@@ -201,7 +201,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow validates the tag against `package.json`, runs typecheck/tests/build/smoke tests, and publishes the GitHub release. The notification workflow then dispatches `formula: io` and the release version to `plakio/homebrew-tap` using `TAP_DISPATCH_TOKEN`. The tap's existing update workflow regenerates `Formula/io.rb`, installs it from source, and runs `brew test`.
+The release workflow validates the tag against `package.json`, runs typecheck/tests/build/smoke tests, publishes the GitHub release, and dispatches `formula: io` plus the release version to `plakio/homebrew-tap` using `TAP_DISPATCH_TOKEN`. A separate notification workflow covers releases published manually outside the tag workflow. The tap's existing update workflow regenerates `Formula/io.rb`, installs it from source, and runs `brew test`.
 
 Do not create a release tag until the application and distribution workflow have been verified.
 
