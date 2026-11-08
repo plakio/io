@@ -11,7 +11,7 @@ import {
 	Key,
 	type Component,
 } from "@earendil-works/pi-tui";
-import { formatDuration, formatUsage } from "../format.js";
+import { formatDuration, formatTokens } from "../format.js";
 import { markdownTheme, style } from "./theme.js";
 
 const ASSISTANT_UPDATE_INTERVAL_MS = 50;
@@ -346,19 +346,33 @@ export class Footer implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const parts: string[] = [];
-		if (this.state.modelRef) parts.push(style.bold(this.state.modelRef));
+		const header: string[] = [];
+		if (this.state.modelRef) header.push(style.bold(this.state.modelRef));
 		let status = this.state.busy ? (this.state.status ?? "generating") : "ready";
 		if ((this.state.queued ?? 0) > 0) status += ` · queued ${this.state.queued}`;
-		parts.push(this.state.busy ? style.bold(status) : style.dim(status));
-		const usage = formatUsage(this.state.usage);
-		if (usage) parts.push(style.dim(usage));
-		if (this.state.speed) parts.push(style.dim(this.state.speed));
-		if (this.state.context) parts.push(style.dim(this.state.context));
-		if (this.state.sessionId) parts.push(style.dim(`session ${this.state.sessionId.slice(0, 8)}`));
+		header.push(this.state.busy ? style.bold(status) : style.dim(status));
+		if (this.state.sessionId) header.push(style.dim(`session ${this.state.sessionId.slice(0, 8)}`));
+
+		const metrics: string[] = [];
+		if (this.state.usage) {
+			const usage: string[] = [];
+			if (this.state.usage.input > 0) usage.push(`in ${formatTokens(this.state.usage.input)}`);
+			if (this.state.usage.output > 0) usage.push(`out ${formatTokens(this.state.usage.output)}`);
+			if (usage.length > 0) metrics.push(style.dim(usage.join(" ")));
+		}
+		if (this.state.speed) metrics.push(style.dim(this.state.speed));
+		if (this.state.context) metrics.push(style.dim(this.state.context));
 
 		const separator = style.dim(" · ");
-		return [truncateToWidth(parts.join(separator), width, "…")];
+		const headerLine = header.join(separator);
+		const metricsLine = metrics.join(separator);
+		if (metrics.length === 0) return [truncateToWidth(headerLine, width, "…")];
+		const combined = `${headerLine}${separator}${metricsLine}`;
+		if (visibleWidth(combined) <= width) return [combined];
+		return [
+			truncateToWidth(headerLine, width, "…"),
+			truncateToWidth(metricsLine, width, "…"),
+		];
 	}
 }
 
