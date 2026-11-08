@@ -52,6 +52,8 @@ Cold page cache (after dropping caches):
 | `io --version` | 2403.6 ms | 690.5 ms | 3383.1 ms | 5 |
 | interactive to first frame | 3364.6 ms | 3108.8 ms | 3756.3 ms | 5 |
 
+The Homebrew-installed `io` wrapper (a Bash `exec` around Node) measured 53.2 ms for `--version`, 501.6 ms to the first interactive frame, and 126.8 MB idle RSS across 5-10 runs. The wrapper overhead is negligible.
+
 The cold numbers are dominated by reading the Node.js runtime and the bundle from disk. They varied widely between runs, which suggests that dropping page cache did not fully isolate the storage path on this host. Treat them as a storage-bound upper bound, not as the normal repeat-launch experience.
 
 ## Memory
