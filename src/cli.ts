@@ -40,6 +40,11 @@ async function run(argv: string[]): Promise<void> {
 			runConfigShow(resolvePaths());
 			return;
 		}
+		case "config-interactive": {
+			const { runConfigInteractive } = await import("./commands/config.js");
+			await runConfigInteractive(resolvePaths());
+			return;
+		}
 		case "config-set": {
 			const { runConfigSet } = await import("./commands/config.js");
 			runConfigSet(resolvePaths(), command.key, command.value);

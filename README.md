@@ -106,6 +106,7 @@ Start in the current working directory. On first use, authenticate with a provid
 | Key | Action |
 | --- | --- |
 | `Enter` | Send prompt |
+| `Tab` after `/` | Complete slash commands |
 | `Shift+Enter` or `Ctrl+J` | Insert newline |
 | Backslash then `Enter` | Insert newline on terminals without Shift+Enter |
 | `Esc` or `Ctrl+C` | Cancel generation or a running command |
@@ -140,11 +141,15 @@ Session files are stored under `~/.local/share/io/sessions` (or `$XDG_DATA_HOME/
 ## Configuration
 
 ```bash
-io config                  # show paths and current preferences
+io config                  # show or edit preferences interactively
+io config show             # show paths and current preferences
+io config edit             # interactive provider, model, and thinking selection
 io config set provider opencode-go
 io config set model opencode-go/deepseek-v4.1-flash
 io config set thinking high
 ```
+
+`io models` and `io sessions` are also interactive in a terminal: `io models` can set the default model, and `io sessions` can resume a selected session. Both remain non-interactive when their output is piped.
 
 Configuration lives in `~/.config/io/config.json`. Credentials are never stored there.
 

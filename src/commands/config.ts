@@ -6,7 +6,20 @@ import {
 	type IoPaths,
 } from "../config.js";
 import { CliError } from "../errors.js";
-import { isSupportedProvider, parseModelReference, providerIds } from "../providers.js";
+import { formatTokens } from "../format.js";
+import { LinePrompter } from "../term-prompt.js";
+import {
+	SUPPORTED_PROVIDERS,
+	isSupportedProvider,
+	parseModelReference,
+	providerIds,
+	providerName,
+} from "../providers.js";
+import {
+	createIoModelRuntime,
+	getProviderStatuses,
+	loadAvailableModels,
+} from "../runtime.js";
 
 export function runConfigShow(paths: IoPaths): void {
 	const { config, warnings } = loadConfig(paths);
@@ -58,4 +71,69 @@ export function runConfigSet(paths: IoPaths, key: string, value: string): void {
 	saveConfig(paths, next);
 	process.stdout.write(`Saved ${paths.configPath}\n`);
 	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"}\n`);
+}
+
+export async function runConfigInteractive(paths: IoPaths): Promise<void> {
+	if (!process.stdin.isTTY || !process.stdout.isTTY) {
+		runConfigShow(paths);
+		return;
+	}
+	const runtime = await createIoModelRuntime(paths);
+	const prompter = new LinePrompter();
+	try {
+		const current = loadConfig(paths).config;
+		process.stdout.write("Current configuration\n");
+		process.stdout.write(`  provider: ${current.provider ?? "—"}\n`);
+		process.stdout.write(`  model:    ${current.model ?? "—"}\n`);
+		process.stdout.write(`  thinking: ${current.thinkingLevel ?? "—"}\n\n`);
+
+		const statuses = await getProviderStatuses(runtime);
+		const providerOptions = SUPPORTED_PROVIDERS.map((provider) => {
+			const status = statuses.find((entry) => entry.id === provider.id);
+			return {
+				id: provider.id,
+				label: provider.name,
+				description: status?.configured
+					? `${status.source ?? "configured"} · ${status.modelCount} model${status.modelCount === 1 ? "" : "s"}`
+					: "not configured",
+			};
+		});
+		const provider = await prompter.select("Select provider:", providerOptions);
+
+		const available = await loadAvailableModels(runtime, provider);
+		let model: string | undefined = current.provider === provider ? current.model : undefined;
+		if (available.models.length > 0) {
+			const modelOptions = available.models.map((entry) => ({
+				id: entry.id,
+				label: entry.id,
+				description: `${entry.name} · ${formatTokens(entry.contextWindow)} ctx`,
+			}));
+			model = await prompter.select("Select default model:", modelOptions);
+		} else {
+			process.stdout.write("No authenticated models for this provider; keeping the previous model.\n");
+		}
+
+		const thinkingOptions = THINKING_LEVELS.map((level) => ({ id: level, label: level }));
+		const thinkingLevel = await prompter.select("Thinking level:", thinkingOptions);
+
+		const next: IoConfig = {
+			...current,
+			provider,
+			thinkingLevel: thinkingLevel as IoConfig["thinkingLevel"],
+		};
+		if (model) next.model = model;
+		else delete next.model;
+		saveConfig(paths, next);
+		process.stdout.write(
+			`\nSaved ${paths.configPath}\nprovider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"}\n`,
+		);
+	} catch (error) {
+		if (error instanceof Error && /cancelled|canceled/i.test(error.message)) {
+			process.stdout.write("\nConfiguration cancelled.\n");
+			return;
+		}
+		throw error;
+	} finally {
+		prompter.close();
+	}
 }

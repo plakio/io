@@ -16,6 +16,7 @@ export type Command =
 	| { kind: "models"; provider?: string; refresh: boolean }
 	| { kind: "sessions" }
 	| { kind: "config-show" }
+	| { kind: "config-interactive" }
 	| { kind: "config-set"; key: string; value: string };
 
 export type ParseResult = { command: Command; error?: never } | { command?: never; error: string };
@@ -29,7 +30,9 @@ Usage:
   io auth status              Show authentication status
   io models [provider]        List available models
   io sessions                 List recent sessions for this directory
-  io config                   Show configuration
+  io config                   Show or edit configuration interactively
+  io config show              Show configuration
+  io config edit              Interactive configuration
   io config set <key> <value> Set provider, model, or thinking level
 
 Options:
@@ -115,8 +118,14 @@ export function parseArgs(args: string[]): ParseResult {
 			return { command: { kind: "sessions" } };
 		case "config": {
 			const subcommand = args[1];
-			if (subcommand === undefined || subcommand === "show") {
+			if (subcommand === "show") {
 				return { command: { kind: "config-show" } };
+			}
+			if (subcommand === "edit") {
+				return { command: { kind: "config-interactive" } };
+			}
+			if (subcommand === undefined) {
+				return { command: { kind: "config-interactive" } };
 			}
 			if (subcommand === "set") {
 				const key = args[2];

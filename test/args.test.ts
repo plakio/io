@@ -38,8 +38,9 @@ test("models, sessions, and config parse", () => {
 		refresh: true,
 	});
 	assert.deepEqual(parseArgs(["sessions"]).command, { kind: "sessions" });
-	assert.deepEqual(parseArgs(["config"]).command, { kind: "config-show" });
+	assert.deepEqual(parseArgs(["config"]).command, { kind: "config-interactive" });
 	assert.deepEqual(parseArgs(["config", "show"]).command, { kind: "config-show" });
+	assert.deepEqual(parseArgs(["config", "edit"]).command, { kind: "config-interactive" });
 	assert.deepEqual(parseArgs(["config", "set", "provider", "opencode-go"]).command, {
 		kind: "config-set",
 		key: "provider",

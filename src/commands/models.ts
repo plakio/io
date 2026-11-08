@@ -1,7 +1,8 @@
-import { loadConfig, type IoPaths } from "../config.js";
+import { loadConfig, saveConfig, type IoPaths } from "../config.js";
 import { CliError } from "../errors.js";
 import { formatTokens } from "../format.js";
-import { getSupportedProvider, providerIds, providerName } from "../providers.js";
+import { LinePrompter } from "../term-prompt.js";
+import { getSupportedProvider, modelReference, providerIds, providerName } from "../providers.js";
 import {
 	createIoModelRuntime,
 	loadAvailableModels,
@@ -38,6 +39,9 @@ export async function runModels(
 	const config = loadConfig(paths).config;
 	const providersToList = provider ? [provider] : providerIds();
 	let printedAny = false;
+	const allModels = providersToList.flatMap((providerId) =>
+		available.models.filter((model) => model.provider === providerId),
+	);
 
 	for (const providerId of providersToList) {
 		const models = available.models.filter((model) => model.provider === providerId);
@@ -71,5 +75,23 @@ export async function runModels(
 	}
 	if (provider === undefined) {
 		process.stdout.write("\n* configured default model\n");
+	}
+
+	if (process.stdin.isTTY && process.stdout.isTTY && printedAny && allModels.length > 0) {
+		const prompter = new LinePrompter();
+		try {
+			const answer = (await prompter.readLine("\nSet a default model? Enter number (blank to exit): ")).trim();
+			const number = Number(answer);
+			if (Number.isInteger(number) && number >= 1 && number <= allModels.length) {
+				const selected = allModels[number - 1];
+				if (selected) {
+					const state = loadConfig(paths);
+					saveConfig(paths, { ...state.config, provider: selected.provider, model: selected.id });
+					process.stdout.write(`Default model: ${modelReference(selected)}\n`);
+				}
+			}
+		} finally {
+			prompter.close();
+		}
 	}
 }

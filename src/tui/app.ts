@@ -1,5 +1,6 @@
 import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
 import {
+	CombinedAutocompleteProvider,
 	Container,
 	Key,
 	matchesKey,
@@ -10,6 +11,7 @@ import {
 	TuiMainScreen,
 	type OverlayHandle,
 } from "@earendil-works/pi-tui";
+import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths } from "../config.js";
 import { saveConfig } from "../config.js";
@@ -114,6 +116,23 @@ export class IoApp {
 		this.tui.addChild(this.footer);
 		this.tui.setFocus(this.editor);
 		this.editor.onSubmit = (text) => this.handleSubmit(text);
+		this.editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "help", description: "Show commands and keys" },
+					{ name: "model", description: "Select or set a model", argumentHint: "[provider/model]" },
+					{ name: "models", description: "List authenticated models" },
+					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
+					{ name: "session", description: "Show session details" },
+					{ name: "login", description: "Authentication instructions" },
+					{ name: "quit", description: "Exit io" },
+					{ name: "exit", description: "Exit io" },
+					{ name: "q", description: "Exit io" },
+				],
+				options.cwd,
+				null,
+			),
+		);
 		this.tui.addInputListener((data) => this.handleGlobalInput(data));
 	}
 
