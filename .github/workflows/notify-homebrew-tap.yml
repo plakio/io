@@ -1,0 +1,41 @@
+name: Notify Homebrew tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch io formula update
+    if: github.repository == 'plakio/io'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate release version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing to notify Homebrew for non-stable version: $TAG" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Send repository dispatch
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "TAP_DISPATCH_TOKEN is not configured for this repository." >&2
+            exit 1
+          fi
+          payload="$(jq -n --arg formula "io" --arg version "$VERSION" \
+            '{event_type: "new-release", client_payload: {formula: $formula, version: $version}}')"
+          printf '%s' "$payload" | gh api --method POST repos/plakio/homebrew-tap/dispatches --input - --silent
+          echo "Notified plakio/homebrew-tap about io $VERSION."
