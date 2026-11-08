@@ -102,5 +102,6 @@ export function isDangerousCommand(command: string): boolean {
 export function sanitizeBashEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const clean = { ...env };
 	delete clean.OPENCODE_API_KEY;
+	delete clean.AWS_BEARER_TOKEN_BEDROCK;
 	return clean;
 }

@@ -65,6 +65,14 @@ OpenAI Codex uses the ChatGPT OAuth flow exposed by the Pi SDK:
 io auth login openai-codex
 ```
 
+Amazon Bedrock uses a bearer token or the AWS credential chain. For Kimi K3 (Global) use a bearer token:
+
+```bash
+io auth login amazon-bedrock
+# or export AWS_BEARER_TOKEN_BEDROCK
+io config set model amazon-bedrock/global.moonshotai.kimi-k3
+```
+
 Check status and remove credentials:
 
 ```bash
@@ -157,6 +165,7 @@ Configuration lives in `~/.config/io/config.json`. Credentials are never stored 
 Environment variables:
 
 - `OPENCODE_API_KEY` — OpenCode Go API key.
+- `AWS_BEARER_TOKEN_BEDROCK` — Amazon Bedrock bearer token.
 - `XDG_CONFIG_HOME`, `XDG_DATA_HOME` — standard directory overrides.
 - `IO_CONFIG_DIR`, `IO_DATA_DIR` — IO-specific directory overrides (useful for tests).
 
@@ -166,7 +175,7 @@ Environment variables:
 - A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires explicit `y` confirmation.
 - Denied commands are reported to the model and are not executed.
 - Running commands are cancelled through the SDK's abort signal on `Esc` or `Ctrl+C`.
-- `OPENCODE_API_KEY` is removed from the environment inherited by Bash commands.
+- `OPENCODE_API_KEY` and `AWS_BEARER_TOKEN_BEDROCK` are removed from the environment inherited by Bash commands.
 - IO does not load Pi extensions, skills, prompt templates, MCP servers, or project context files automatically.
 - Provider credentials are never written to logs or committed.
 

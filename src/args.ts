@@ -46,6 +46,7 @@ Options:
 Providers:
   opencode-go                 OpenCode Go (API key or OPENCODE_API_KEY)
   openai-codex                OpenAI Codex (ChatGPT OAuth)
+  amazon-bedrock              Amazon Bedrock (bearer token or AWS credentials)
 
 Session commands:
   /help  /model  /models  /diff  /session  /login  /quit

@@ -55,10 +55,12 @@ test("risk assessment explains why a command is dangerous", () => {
 test("provider API keys are removed from bash environments", () => {
 	const env = sanitizeBashEnvironment({
 		OPENCODE_API_KEY: "secret",
+		AWS_BEARER_TOKEN_BEDROCK: "secret2",
 		PATH: "/usr/bin",
 		HOME: "/home/user",
 	});
 	assert.equal(env.OPENCODE_API_KEY, undefined);
+	assert.equal(env.AWS_BEARER_TOKEN_BEDROCK, undefined);
 	assert.equal(env.PATH, "/usr/bin");
 	assert.equal(env.HOME, "/home/user");
 });

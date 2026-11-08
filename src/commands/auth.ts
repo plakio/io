@@ -110,6 +110,11 @@ export async function runAuthLogin(paths: IoPaths, providerArg?: string): Promis
 	const interaction = createInteraction(prompter, controller);
 
 	process.stdout.write(`Authenticating with ${provider.name} (${provider.id})...\n`);
+	if (providerId === "amazon-bedrock") {
+		process.stdout.write(
+			"Bedrock uses a bearer token or AWS credentials. For Kimi K3 (Global) enter your bearer token.\n",
+		);
+	}
 	try {
 		await loginProvider(runtime, providerId, interaction, {
 			getDeviceId: () => getOrCreateDeviceId(paths),
@@ -132,8 +137,12 @@ export async function runAuthLogin(paths: IoPaths, providerArg?: string): Promis
 		delete config.model;
 	}
 	if (config.provider === providerId && !config.model) {
-		const first = available.models[0];
-		if (first) config.model = first.id;
+		let preferred = available.models[0];
+		if (providerId === "amazon-bedrock") {
+			const kimi = available.models.find((model) => model.id === "global.moonshotai.kimi-k3");
+			if (kimi) preferred = kimi;
+		}
+		if (preferred) config.model = preferred.id;
 	}
 	try {
 		saveConfig(paths, config);

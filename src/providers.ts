@@ -13,6 +13,12 @@ export const SUPPORTED_PROVIDERS = [
 		auth: "oauth",
 		loginHint: "io auth login openai-codex",
 	},
+	{
+		id: "amazon-bedrock",
+		name: "Amazon Bedrock",
+		auth: "api_key",
+		loginHint: "io auth login amazon-bedrock (or export AWS_BEARER_TOKEN_BEDROCK)",
+	},
 ] as const;
 
 export type SupportedProviderId = (typeof SUPPORTED_PROVIDERS)[number]["id"];
@@ -130,6 +136,12 @@ export function selectModel(
 
 	if (preferredProvider) {
 		const providerModels = restricted.filter((model) => model.provider === preferredProvider);
+		if (preferredProvider === "amazon-bedrock" && !preference.model) {
+			return {
+				ok: false,
+				error: `Amazon Bedrock requires a model. Choose one from \`io models amazon-bedrock\` (for example: \`io config set model amazon-bedrock/global.moonshotai.kimi-k3\`).`,
+			};
+		}
 		if (providerModels.length === 0) {
 			const fallback = chooseFirst(restricted);
 			return {
