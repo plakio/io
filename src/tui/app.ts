@@ -130,8 +130,7 @@ export class IoApp {
 		this.renderInitialState();
 		this.subscribe();
 		this.tui.start();
-		this.tui.terminal.setTitle("io");
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		this.tui.requestRender();
 
 		return new Promise<number>((resolve) => {
@@ -212,7 +211,7 @@ export class IoApp {
 				this.status = "generating";
 				this.lastUsage = undefined;
 				this.lastDurationMs = undefined;
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "agent_end":
 				if (!this.busy) this.busy = true;
@@ -222,7 +221,7 @@ export class IoApp {
 				this.status = undefined;
 				this.activeAssistant?.dispose();
 				this.activeAssistant = undefined;
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "message_start":
 				if (event.message.role === "user") {
@@ -249,7 +248,7 @@ export class IoApp {
 						this.lastUsage = assistant.usage;
 						this.lastDurationMs = assistant.durationMs;
 					}
-					this.updateFooter();
+					this.updateFooterAndTitle();
 				}
 				break;
 			case "tool_execution_start": {
@@ -262,7 +261,7 @@ export class IoApp {
 				this.activeTools.set(event.toolCallId, block);
 				this.status = `running ${event.toolName}`;
 				this.addBlock(block);
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			}
 			case "tool_execution_update": {
@@ -274,7 +273,7 @@ export class IoApp {
 				block?.setResult(event.result, event.isError, event.durationMs);
 				this.activeTools.delete(event.toolCallId);
 				this.status = this.busy ? "generating" : undefined;
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			}
 			case "auto_retry_start":
@@ -282,7 +281,7 @@ export class IoApp {
 				this.addNotice(`provider error; retrying in ${Math.ceil(event.delayMs / 1000)}s (${event.attempt}/${event.maxAttempts})`, {
 					dim: true,
 				});
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "auto_retry_end":
 				if (!event.success) {
@@ -292,7 +291,7 @@ export class IoApp {
 			case "compaction_start":
 				this.status = "compacting context";
 				this.addNotice("compacting context…", { dim: true });
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "compaction_end":
 				this.status = this.busy ? "generating" : undefined;
@@ -301,12 +300,12 @@ export class IoApp {
 				} else if (event.errorMessage) {
 					this.addNotice(`compaction failed: ${event.errorMessage}`, { bold: true });
 				}
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "queue_update":
 				this.queued = event.steering.length + event.followUp.length;
 				if (this.queued === 0 && this.busy && this.status === "queued") this.status = "generating";
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				break;
 			case "session_info_changed":
 			case "thinking_level_changed":
@@ -315,6 +314,24 @@ export class IoApp {
 			default:
 				break;
 		}
+	}
+
+	private updateTerminalTitle(): void {
+		const model = this.session.model ?? this.options.model;
+		const marker = this.busy ? "⏳" : "✓";
+		const parts = ["io"];
+		if (model) parts.push(`${model.provider}/${model.id}`);
+		const cwd = this.options.cwd;
+		if (cwd && cwd !== "/") {
+			const short = cwd.split("/").filter(Boolean).slice(-2).join("/");
+			if (short) parts.push(short);
+		}
+		this.tui.terminal.setTitle(`${marker} ${parts.join(" · ")}`);
+	}
+
+	private updateFooterAndTitle(): void {
+		this.updateFooter();
+		this.updateTerminalTitle();
 	}
 
 	private updateFooter(): void {
@@ -350,11 +367,11 @@ export class IoApp {
 			} else {
 				this.lastCtrlC = now;
 				this.status = "press ctrl+c again to exit";
-				this.updateFooter();
+				this.updateFooterAndTitle();
 				setTimeout(() => {
 					if (!this.busy && this.status === "press ctrl+c again to exit") {
 						this.status = undefined;
-						this.updateFooter();
+						this.updateFooterAndTitle();
 					}
 				}, 2000).unref?.();
 			}
@@ -431,7 +448,7 @@ export class IoApp {
 				this.addNotice("queued messages restored to the editor", { dim: true });
 			}
 			this.queued = 0;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 			return { consume: true };
 		}
 
@@ -440,11 +457,11 @@ export class IoApp {
 			this.toolOutputExpanded = !this.toolOutputExpanded;
 			for (const block of this.toolBlocks) block.setExpanded(this.toolOutputExpanded);
 			this.status = this.toolOutputExpanded ? "tool output expanded" : "tool output collapsed";
-			this.updateFooter();
+			this.updateFooterAndTitle();
 			setTimeout(() => {
 				if (this.status === "tool output expanded" || this.status === "tool output collapsed") {
 					this.status = this.busy ? "generating" : undefined;
-					this.updateFooter();
+					this.updateFooterAndTitle();
 				}
 			}, 1500).unref?.();
 			return { consume: true };
@@ -464,7 +481,7 @@ export class IoApp {
 			if (this.session.isStreaming) {
 				if (!options.followUp) {
 					this.status = "queued";
-					this.updateFooter();
+					this.updateFooterAndTitle();
 				}
 				await this.session.prompt(text, { streamingBehavior: "followUp" });
 			} else {
@@ -473,7 +490,7 @@ export class IoApp {
 		} catch (error) {
 			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
 			this.status = undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
@@ -597,12 +614,12 @@ export class IoApp {
 			this.status = undefined;
 			this.closeOverlay();
 			void this.applyEffort(item.value);
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		};
 		list.onCancel = () => {
 			this.status = undefined;
 			this.closeOverlay();
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		};
 
 		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
@@ -634,7 +651,7 @@ export class IoApp {
 				});
 			}
 			this.addNotice(`effort: ${actual}`, { dim: true });
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		} catch (error) {
 			this.addNotice(`could not set effort: ${(error as Error).message}`, { bold: true });
 		}
@@ -646,7 +663,7 @@ export class IoApp {
 			return;
 		}
 		this.status = "compacting";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const result = await this.session.compact();
 			this.addNotice("context compacted", { dim: true });
@@ -654,7 +671,7 @@ export class IoApp {
 			this.addNotice(`could not compact: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
@@ -709,7 +726,7 @@ export class IoApp {
 		this.queued = 0;
 		this.renderInitialState();
 		old.dispose();
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		this.addNotice("switched session", { dim: true });
 	}
 
@@ -719,7 +736,7 @@ export class IoApp {
 			return;
 		}
 		this.status = "starting new session";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const replacement = await replaceHarnessSession(this.options.harness, {
 				cwd: this.options.cwd,
@@ -734,7 +751,7 @@ export class IoApp {
 			this.addNotice(`could not start a new session: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
@@ -744,7 +761,7 @@ export class IoApp {
 			return;
 		}
 		this.status = "loading sessions";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const { listSessions } = await import("../session.js");
 			const sessions = await listSessions(this.options.paths, this.options.cwd);
@@ -797,7 +814,7 @@ export class IoApp {
 			list.onCancel = () => {
 				this.status = undefined;
 				this.closeOverlay();
-				this.updateFooter();
+				this.updateFooterAndTitle();
 			};
 			this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
 				anchor: "center",
@@ -812,7 +829,7 @@ export class IoApp {
 		} finally {
 			if (!this.activeOverlay) {
 				this.status = undefined;
-				this.updateFooter();
+				this.updateFooterAndTitle();
 			}
 		}
 	}
@@ -860,7 +877,7 @@ export class IoApp {
 			return;
 		}
 		this.status = "selecting fork point";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		const items = messages.slice(-20).map((entry, index) => ({
 			value: entry.entryId,
 			label: `${index + 1}. ${oneLine(entry.text, 55)}`,
@@ -881,7 +898,7 @@ export class IoApp {
 		list.onCancel = () => {
 			this.status = undefined;
 			this.closeOverlay();
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		};
 		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
 			anchor: "center",
@@ -895,7 +912,7 @@ export class IoApp {
 
 	private async doFork(entry: { entryId: string; text: string }): Promise<void> {
 		this.status = "forking";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 			const sessionFile = this.session.sessionFile;
@@ -924,14 +941,14 @@ export class IoApp {
 			this.addNotice(`could not fork: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
 	private async showModelPicker(): Promise<void> {
 		if (this.activeOverlay) return;
 		this.status = "loading models";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
 			const models = available.models;
@@ -953,24 +970,59 @@ export class IoApp {
 				const index = items.findIndex((item) => item.value === modelReference(current));
 				if (index >= 0) list.setSelectedIndex(index);
 			}
+
+			const search = new Text("", 0, 0);
 			const box = new Container();
 			box.addChild(new Text(style.bold("Select a model"), 0, 0));
 			box.addChild(new Spacer(1));
+			box.addChild(search);
+			box.addChild(new Spacer(1));
 			box.addChild(list);
 			box.addChild(new Spacer(1));
-			box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+			box.addChild(new Text(style.dim("type to filter · ↑↓ move · enter select · esc cancel"), 0, 0));
+
+			let filter = "";
+			const applyFilter = () => {
+				list.setFilter(filter);
+				search.setText(style.dim(`filter: ${filter || "—"}`));
+				this.tui.requestRender();
+			};
+			const onInput = (data: string): boolean => {
+				if (data === "\r" || data === "\n") return false;
+				if (data === "\x7f" || data === "\b") {
+					if (filter.length > 0) {
+						filter = filter.slice(0, -1);
+						applyFilter();
+					}
+					return true;
+				}
+				if (data === "\x1b" || data === "\x03") return false;
+				if (data.length > 0 && !data.startsWith("\x1b") && data.charCodeAt(0) >= 32) {
+					filter += data;
+					applyFilter();
+					return true;
+				}
+				return false;
+			};
+			const removeListener = this.tui.addInputListener((data) => {
+				if (!this.activeOverlay) {
+					removeListener();
+					return undefined;
+				}
+				return onInput(data) ? { consume: true } : undefined;
+			});
 
 			list.onSelect = (item) => {
 				this.status = undefined;
 				this.closeOverlay();
 				const model = models.find((candidate) => modelReference(candidate) === item.value);
 				if (model) void this.applyModel(model);
-				this.updateFooter();
+				this.updateFooterAndTitle();
 			};
 			list.onCancel = () => {
 				this.status = undefined;
 				this.closeOverlay();
-				this.updateFooter();
+				this.updateFooterAndTitle();
 			};
 
 			this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
@@ -981,12 +1033,13 @@ export class IoApp {
 			});
 			this.tui.setFocus(list);
 			this.tui.requestRender();
+			applyFilter();
 		} catch (error) {
 			this.addNotice(`could not load models: ${(error as Error).message}`, { bold: true });
 		} finally {
 			if (!this.activeOverlay) {
 				this.status = undefined;
-				this.updateFooter();
+				this.updateFooterAndTitle();
 			}
 		}
 	}
@@ -1005,7 +1058,7 @@ export class IoApp {
 			return;
 		}
 		this.status = "loading models";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
 			const models = available.models;
@@ -1025,7 +1078,7 @@ export class IoApp {
 			this.addNotice(`could not cycle model: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
@@ -1060,12 +1113,12 @@ export class IoApp {
 			});
 		}
 		this.addNotice(`model: ${modelReference(model)}`, { dim: true });
-		this.updateFooter();
+		this.updateFooterAndTitle();
 	}
 
 	private async listModels(): Promise<void> {
 		this.status = "loading models";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
 			if (available.models.length === 0) {
@@ -1082,13 +1135,13 @@ export class IoApp {
 			this.addNotice(`could not list models: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = this.busy ? "generating" : undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
 	private async showDiff(path?: string): Promise<void> {
 		this.status = "reading diff";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			const result = await getGitDiff(this.options.cwd, path);
 			this.addNotice(`${style.bold("diff")}\n\n${result.text}`);
@@ -1096,7 +1149,7 @@ export class IoApp {
 			this.addNotice(`could not read diff: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = this.busy ? "generating" : undefined;
-			this.updateFooter();
+			this.updateFooterAndTitle();
 		}
 	}
 
@@ -1132,7 +1185,7 @@ export class IoApp {
 	private async cancelGeneration(): Promise<void> {
 		if (!this.session.isStreaming) return;
 		this.status = "cancelling";
-		this.updateFooter();
+		this.updateFooterAndTitle();
 		try {
 			await this.session.abort();
 		} catch (error) {
