@@ -38,7 +38,15 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 			"The parent agent sees the subagent's final summary, not its intermediate commands.",
 		],
 		parameters: subagentSchema,
-		async execute(_toolCallId, { agent, task }, signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, { agent, task }, signal, onUpdate, _ctx) {
+			const startedAt = Date.now();
+			const pushProgress = (message: string) => {
+				onUpdate?.({
+					content: [{ type: "text", text: message }],
+					details: message,
+				});
+			};
+
 			const definition = getSubagents(catalog).find((candidate) => candidate.id === agent);
 			if (!definition) {
 				return {
@@ -57,7 +65,7 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 				};
 			}
 
-			const readonly = definition.access === "readonly" || definition.access === "plan";
+			const readonly = definition.access === "readonly";
 			const session = await createHarness({
 				cwd,
 				paths,
@@ -69,13 +77,18 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 			});
 
 			try {
+				pushProgress(`subagent ${agent} starting`);
 				await session.session.prompt(task);
 				const text = session.session.getLastAssistantText() ?? "(no summary returned)";
+				const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+				pushProgress(`subagent ${agent} completed in ${elapsed}s`);
 				return {
 					content: [{ type: "text", text }],
 					details: `subagent ${agent} completed`,
 				};
 			} catch (error) {
+				const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+				pushProgress(`subagent ${agent} failed in ${elapsed}s`);
 				return {
 					content: [{ type: "text", text: `Subagent ${agent} failed: ${(error as Error).message}` }],
 					isError: true,

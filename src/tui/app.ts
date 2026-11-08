@@ -24,7 +24,7 @@ import {
 	type ConfirmCommand,
 	type Harness,
 } from "../session.js";
-import { getAgent, getPrimaryAgents, type AgentCatalog } from "../agents.js";
+import { getPrimaryAgents, type AgentCatalog } from "../agents.js";
 import { VERSION } from "../version.js";
 import { AssistantBlock, ConfirmOverlay, Footer, NoticeBlock, PaddedBox, ToolBlock, UserBlock } from "./components.js";
 import { IoEditor } from "./editor.js";
@@ -499,11 +499,7 @@ export class IoApp {
 				this.addNotice(HELP, { dim: true });
 				return;
 			case "/agent":
-				if (!argument) {
-					await this.showAgentSelector();
-				} else {
-					await this.applyAgent(argument);
-				}
+				this.addNotice(`agent: ${this.options.harness.agent.id} (${this.options.harness.agent.name})`, { dim: true });
 				return;
 			case "/quit":
 			case "/exit":
@@ -678,7 +674,7 @@ export class IoApp {
 					{ name: "name", description: "Rename the current session", argumentHint: "[name]" },
 					{ name: "export", description: "Export the session", argumentHint: "[jsonl|html] [path]" },
 					{ name: "fork", description: "Fork the session from a previous message", argumentHint: "[message]" },
-					{ name: "agent", description: `Switch primary agent (current: ${currentAgent.id})`, argumentHint: "[build|plan]" },
+					{ name: "agent", description: `Show current agent (current: ${currentAgent.id})`, argumentHint: "" },
 					...primaryAgents.map((agent) => ({
 						name: agent.id,
 						description: `${agent.name} agent (${agent.kind})`,
@@ -926,73 +922,6 @@ export class IoApp {
 			this.addNotice(`forked from message · ${oneLine(entry.text, 60)}`, { dim: true });
 		} catch (error) {
 			this.addNotice(`could not fork: ${(error as Error).message}`, { bold: true });
-		} finally {
-			this.status = undefined;
-			this.updateFooter();
-		}
-	}
-
-	private async showAgentSelector(): Promise<void> {
-		if (this.activeOverlay) return;
-		const primaryAgents = getPrimaryAgents(this.options.harness.agentCatalog);
-		const current = this.options.harness.agent;
-		const items = primaryAgents.map((agent) => ({
-			value: agent.id,
-			label: agent.name,
-			description: agent.id === current.id ? "current" : agent.access,
-		}));
-		const list = new SelectList(items, Math.min(items.length, 10), selectListTheme);
-		const box = new Container();
-		box.addChild(new Text(style.bold("Select primary agent"), 0, 0));
-		box.addChild(new Spacer(1));
-		box.addChild(list);
-		box.addChild(new Spacer(1));
-		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
-		list.onSelect = async (item) => {
-			this.closeOverlay();
-			await this.applyAgent(item.value);
-		};
-		list.onCancel = () => {
-			this.closeOverlay();
-			this.updateFooter();
-		};
-		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
-			anchor: "center",
-			width: this.tui.terminal.columns,
-			maxHeight: "60%",
-			margin: 0,
-		});
-		this.tui.setFocus(list);
-		this.tui.requestRender();
-	}
-
-	private async applyAgent(idRaw: string): Promise<void> {
-		const id = idRaw.trim().toLowerCase();
-		const agent = getAgent(this.options.harness.agentCatalog, id);
-		if (!agent || agent.kind !== "primary") {
-			this.addNotice(`unknown primary agent "${idRaw}". Available: ${getPrimaryAgents(this.options.harness.agentCatalog).map((agent) => agent.id).join(", ")}`, { bold: true });
-			return;
-		}
-		if (agent.id === this.options.harness.agent.id) {
-			this.addNotice(`agent: ${agent.id}`, { dim: true });
-			return;
-		}
-		this.status = `switching to ${agent.id}`;
-		this.updateFooter();
-		try {
-			const replacement = await replaceHarnessSession(this.options.harness, {
-				cwd: this.options.cwd,
-				paths: this.options.paths,
-				modelRuntime: this.options.runtime,
-				confirmCommand: this.getConfirmCommand(),
-				model: this.session.model ?? undefined,
-				thinkingLevel: this.session.thinkingLevel ?? undefined,
-			});
-			await this.switchToHarness(replacement);
-			this.addNotice(`agent: ${agent.id} (${agent.name})`, { dim: true });
-			this.updateFooter();
-		} catch (error) {
-			this.addNotice(`could not switch agent: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = undefined;
 			this.updateFooter();

@@ -2,7 +2,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "./config.js";
 
 export type AgentKind = "primary" | "subagent" | "hidden";
-export type AgentAccess = "full" | "readonly" | "plan";
+export type AgentAccess = "full" | "readonly";
 
 export interface AgentDefinition {
 	id: string;
@@ -23,9 +23,7 @@ function promptPrimary(access: AgentAccess, canDelegate: boolean): string {
 	const accessText =
 		access === "readonly"
 			? "\nYou are read-only. Do not modify files, run destructive commands, or install packages. You can read, search, and inspect, but you cannot edit."
-			: access === "plan"
-				? "\nYou are planning-only. Do not modify project files. You may only write plan files when explicitly asked. Shell commands are read-only."
-				: "";
+			: "";
 	const delegate = canDelegate
 		? "\nYou can delegate independent work to subagents with the `subagent` tool when a task would be faster, safer, or cleaner with fresh context. Subagents return a summary; you keep the main conversation context."
 		: "";
@@ -48,13 +46,6 @@ export const DEFAULT_AGENTS: AgentCatalog = {
 			kind: "primary",
 			access: "full",
 			systemPrompt: promptPrimary("full", true),
-		},
-		{
-			id: "plan",
-			name: "Plan",
-			kind: "primary",
-			access: "plan",
-			systemPrompt: promptPrimary("plan", false),
 		},
 		{
 			id: "general",
@@ -90,7 +81,7 @@ export function canDelegate(agent: AgentDefinition): boolean {
 }
 
 export function isReadonlyAccess(access: AgentAccess): boolean {
-	return access === "readonly" || access === "plan";
+	return access === "readonly";
 }
 
 export function resolveAgentModel(

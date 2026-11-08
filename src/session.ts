@@ -10,7 +10,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { IoPaths, ThinkingLevel } from "./config.js";
-import { DEFAULT_AGENTS, getAgent, canDelegate, isReadonlyAccess, type AgentCatalog, type AgentDefinition } from "./agents.js";
+import { DEFAULT_AGENTS, getAgent, canDelegate, type AgentCatalog, type AgentDefinition } from "./agents.js";
 import { assessCommand, sanitizeBashEnvironment } from "./safety.js";
 import { buildIoSystemPrompt } from "./system-prompt.js";
 import { createSubagentTool } from "./subagent-tool.js";
