@@ -30,6 +30,7 @@ const HELP = `Commands
   /help            Show this help
   /model [ref]     Select a model, or set provider/model directly
   /models          List authenticated models
+  /effort [level]  Select or set thinking effort
   /diff [path]     Show git status, stat, and patch
   /session         Show session details and token usage
   /login           Show authentication instructions
@@ -122,6 +123,7 @@ export class IoApp {
 					{ name: "help", description: "Show commands and keys" },
 					{ name: "model", description: "Select or set a model", argumentHint: "[provider/model]" },
 					{ name: "models", description: "List authenticated models" },
+					{ name: "effort", description: "Select or set thinking effort", argumentHint: "[level]" },
 					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
@@ -452,6 +454,14 @@ export class IoApp {
 					await this.setModelByReference(argument);
 				}
 				return;
+			case "/effort":
+			case "/thinking":
+				if (!argument) {
+					await this.showEffortSelector();
+				} else {
+					await this.applyEffort(argument);
+				}
+				return;
 			case "/models":
 				await this.listModels();
 				return;
@@ -474,6 +484,78 @@ export class IoApp {
 				return;
 			default:
 				this.addNotice(`unknown command: ${command}. Type /help for commands.`, { bold: true });
+		}
+	}
+
+	private async showEffortSelector(): Promise<void> {
+		if (this.activeOverlay) return;
+		const levels = this.session.getAvailableThinkingLevels();
+		if (levels.length === 0) {
+			this.addNotice("This model does not expose thinking levels.", { dim: true });
+			return;
+		}
+		const current = this.session.thinkingLevel;
+		const items = levels.map((level) => ({
+			value: level,
+			label: level,
+			description: level === current ? "current" : "",
+		}));
+		const list = new SelectList(items, Math.min(levels.length, 10), selectListTheme);
+		if (current) {
+			const index = levels.indexOf(current);
+			if (index >= 0) list.setSelectedIndex(index);
+		}
+		const box = new Container();
+		box.addChild(new Text(style.bold("Select thinking effort"), 0, 0));
+		box.addChild(new Spacer(1));
+		box.addChild(list);
+		box.addChild(new Spacer(1));
+		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+
+		list.onSelect = (item) => {
+			this.status = undefined;
+			this.closeOverlay();
+			void this.applyEffort(item.value);
+			this.updateFooter();
+		};
+		list.onCancel = () => {
+			this.status = undefined;
+			this.closeOverlay();
+			this.updateFooter();
+		};
+
+		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+			anchor: "center",
+			width: this.tui.terminal.columns,
+			maxHeight: "60%",
+			margin: 0,
+		});
+		this.tui.setFocus(list);
+		this.tui.requestRender();
+	}
+
+	private async applyEffort(levelRaw: string): Promise<void> {
+		const levels = this.session.getAvailableThinkingLevels();
+		const level = levels.find((entry) => entry.toLowerCase() === levelRaw.trim().toLowerCase());
+		if (!level) {
+			this.addNotice(`unknown effort "${levelRaw}". Available: ${levels.join(", ")}`, { bold: true });
+			return;
+		}
+		try {
+			this.session.setThinkingLevel(level, { persist: false });
+			const actual = this.session.thinkingLevel ?? level;
+			this.config = { ...this.config, thinkingLevel: actual };
+			try {
+				saveConfig(this.options.paths, this.config);
+			} catch (error) {
+				this.addNotice(`warning: effort changed but preference was not saved: ${(error as Error).message}`, {
+					bold: true,
+				});
+			}
+			this.addNotice(`effort: ${actual}`, { dim: true });
+			this.updateFooter();
+		} catch (error) {
+			this.addNotice(`could not set effort: ${(error as Error).message}`, { bold: true });
 		}
 	}
 
@@ -628,6 +710,7 @@ export class IoApp {
 			`file       ${stats.sessionFile ?? "(not persisted)"}`,
 			`cwd        ${this.options.cwd}`,
 			`model      ${model ? modelReference(model as Model<any>) : "—"}`,
+			`thinking   ${this.session.thinkingLevel ?? "—"}`,
 			`messages   ${formatCount(stats.totalMessages)} (${stats.userMessages} user, ${stats.assistantMessages} assistant, ${stats.toolResults} tool)`,
 			`tokens     ${formatTokens(stats.tokens.input)} in · ${formatTokens(stats.tokens.output)} out · ${formatTokens(stats.tokens.cacheRead)} cache read`,
 		];

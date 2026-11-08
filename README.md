@@ -122,6 +122,7 @@ Pastes are inserted as the actual text. Large pasted content can be reviewed and
 /help            show commands and keys
 /model [ref]     select a model
 /models          list authenticated models
+/effort [level]  select or set thinking effort
 /diff [path]     show git status, stat, and patch
 /session         show session details and token usage
 /login           authentication instructions
