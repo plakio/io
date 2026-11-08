@@ -1,5 +1,9 @@
 name: Notify Homebrew tap
 
+# Releases created by the tag workflow use GITHUB_TOKEN, and GitHub does not
+# start workflows from events caused by GITHUB_TOKEN. The release workflow
+# therefore dispatches the tap directly. This workflow covers releases that are
+# published manually or through another client.
 on:
   release:
     types: [published]

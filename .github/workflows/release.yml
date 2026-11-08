@@ -13,6 +13,8 @@ jobs:
     name: Validate and publish
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,6 +23,7 @@ jobs:
           cache: npm
 
       - name: Validate tag and package version
+        id: version
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -34,6 +37,7 @@ jobs:
             echo "Tag $tag does not match package.json version $package_version" >&2
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Releasing io $version"
 
       - name: Install dependencies
@@ -60,3 +64,24 @@ jobs:
             --title "io $GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag
+
+  notify:
+    name: Notify Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send repository dispatch
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "TAP_DISPATCH_TOKEN is not configured for this repository." >&2
+            exit 1
+          fi
+          payload="$(jq -n --arg formula "io" --arg version "$VERSION" \
+            '{event_type: "new-release", client_payload: {formula: $formula, version: $version}}')"
+          printf '%s' "$payload" | gh api --method POST repos/plakio/homebrew-tap/dispatches --input - --silent
+          echo "Notified plakio/homebrew-tap about io $VERSION."
