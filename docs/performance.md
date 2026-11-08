@@ -74,9 +74,9 @@ Synthetic worst-case assistant rendering:
 | Response size | 17,213 characters |
 | Updates | 250 |
 | Render width | 100 columns |
-| Median per update | 0.56 ms |
-| p95 per update | 0.87 ms |
-| Max per update | 19.08 ms |
+| Median per update | 0.60 ms |
+| p95 per update | 0.95 ms |
+| Max per update | 19.01 ms |
 
 The TUI throttles assistant text updates to 50 ms intervals and coalesces render requests. Tool output updates are similarly bounded by the SDK and the render loop. Input is handled by the focused editor independently of provider streaming, so typing and cancellation remain available while a response is arriving.
 
