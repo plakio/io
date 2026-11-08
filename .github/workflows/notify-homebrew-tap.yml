@@ -7,6 +7,12 @@ name: Notify Homebrew tap
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to notify (for example, 0.1.0 or v0.1.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,7 +26,7 @@ jobs:
     steps:
       - name: Validate release version
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.version }}
         run: |
           set -euo pipefail
           version="${TAG#v}"
