@@ -1,0 +1,32 @@
+{
+  "name": "io",
+  "version": "0.1.0",
+  "description": "A minimal AI coding harness powered by the Pi SDK, built for Plak.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "io": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "rm -rf dist && node scripts/collect-licenses.mjs && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outdir=dist --splitting --banner:js=\"import { createRequire as __ioCreateRequire } from 'node:module'; const require = __ioCreateRequire(import.meta.url);\" --log-level=warning",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:smoke": "node dist/cli.js --version && node dist/cli.js --help > /dev/null && test -s dist/THIRD_PARTY_NOTICES.txt && ! grep -q 'PACKAGES WITH DECLARED LICENSES' dist/THIRD_PARTY_NOTICES.txt",
+    "bench:render": "node --import tsx scripts/bench-render.ts",
+    "start": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

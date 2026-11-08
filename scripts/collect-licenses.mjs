@@ -1,0 +1,181 @@
+#!/usr/bin/env node
+
+// Collect license and notice files for the production dependency tree. The
+// bundled executable contains third-party code, so the installed artifact must
+// keep the corresponding license texts. This file is generated, not hand-edited.
+
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+
+const root = process.cwd();
+const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const outputPath = resolve(root, process.argv[2] ?? "dist/THIRD_PARTY_NOTICES.txt");
+const fallbackLicense = join(root, "LICENSES", "pi-MIT.txt");
+
+const packages = new Map();
+
+function resolvePackage(name, fromDirectory) {
+	let directory = fromDirectory;
+	for (;;) {
+		const candidate = join(directory, "node_modules", name);
+		if (existsSync(join(candidate, "package.json"))) return candidate;
+		const parent = dirname(directory);
+		if (parent === directory) return undefined;
+		directory = parent;
+	}
+}
+
+function visit(name, fromDirectory) {
+	const directory = resolvePackage(name, fromDirectory);
+	if (!directory || packages.has(directory)) return;
+	let pkg;
+	try {
+		pkg = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+	} catch {
+		return;
+	}
+	packages.set(directory, { directory, pkg });
+	for (const dependency of Object.keys(pkg.dependencies ?? {})) visit(dependency, directory);
+	for (const dependency of Object.keys(pkg.optionalDependencies ?? {})) visit(dependency, directory);
+}
+
+for (const dependency of Object.keys(rootPackage.dependencies ?? {})) visit(dependency, root);
+
+const LICENSE_FILE = /^(licen[cs]e|copying|notice)/i;
+
+function collectLicenseFiles(directory) {
+	const files = [];
+	for (const entry of readdirSync(directory)) {
+		const path = join(directory, entry);
+		let stat;
+		try {
+			stat = statSync(path);
+		} catch {
+			continue;
+		}
+		if (stat.isFile() && LICENSE_FILE.test(entry)) files.push(path);
+		if (stat.isDirectory() && entry.toLowerCase() === "licenses") {
+			for (const nested of readdirSync(path)) {
+				const nestedPath = join(path, nested);
+				if (statSync(nestedPath).isFile()) files.push(nestedPath);
+			}
+		}
+	}
+	return files;
+}
+
+function readText(path) {
+	try {
+		return readFileSync(path, "utf8").trim();
+	} catch {
+		return "";
+	}
+}
+
+function repositoryOf(pkg) {
+	const repository = pkg.repository;
+	const url = typeof repository === "string" ? repository : repository?.url;
+	if (!url) return "";
+	return url.replace(/^git\+/, "").replace(/\.git$/, "");
+}
+
+const licenseGroups = new Map();
+const textByLicense = new Map();
+const packageRows = [];
+const missingText = [];
+
+for (const { directory, pkg } of packages.values()) {
+	const name = pkg.name ?? "unknown";
+	const version = pkg.version ?? "?";
+	const license = typeof pkg.license === "string" ? pkg.license : "UNKNOWN";
+	packageRows.push({ name, version, license, repository: repositoryOf(pkg) });
+
+	let files = collectLicenseFiles(directory);
+	if (files.length === 0 && name.startsWith("@earendil-works/") && existsSync(fallbackLicense)) {
+		files = [fallbackLicense];
+	}
+	if (files.length === 0) {
+		missingText.push({ name, version, license, repository: repositoryOf(pkg) });
+		continue;
+	}
+	let firstText;
+	for (const file of files) {
+		const text = readText(file);
+		if (!text) continue;
+		firstText ??= text;
+		const hash = createHash("sha256").update(text).digest("hex").slice(0, 12);
+		if (!licenseGroups.has(hash)) {
+			licenseGroups.set(hash, { text, packages: [] });
+		}
+		const group = licenseGroups.get(hash);
+		if (!group.packages.some((entry) => entry.name === name && entry.version === version)) {
+			group.packages.push({ name, version });
+		}
+	}
+	if (firstText && files.length === 1 && !textByLicense.has(license)) {
+		textByLicense.set(license, firstText);
+	}
+}
+
+// A few packages declare a standard license in package.json but do not ship a
+// license file. Point them at an identical license text already in the bundle.
+for (let index = missingText.length - 1; index >= 0; index--) {
+	const entry = missingText[index];
+	if (!entry) continue;
+	const text = textByLicense.get(entry.license);
+	if (!text) continue;
+	const hash = createHash("sha256").update(text).digest("hex").slice(0, 12);
+	const group = licenseGroups.get(hash);
+	if (!group) continue;
+	group.packages.push({ name: entry.name, version: entry.version });
+	missingText.splice(index, 1);
+}
+
+packageRows.sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
+missingText.sort((left, right) => left.name.localeCompare(right.name));
+const groups = [...licenseGroups.entries()].sort((left, right) => left[1].text.localeCompare(right[1].text));
+
+const lines = [
+	"IO THIRD-PARTY NOTICES",
+	"======================",
+	"",
+	"This file accompanies a distribution of IO that bundles third-party",
+	"software. It is generated by scripts/collect-licenses.mjs from the",
+	"production dependency tree. It is not the IO project license.",
+	"",
+	`Packages: ${packageRows.length}`,
+	`License texts: ${groups.length} unique texts`,
+	"",
+	"PACKAGES",
+	"--------",
+	...packageRows.map(
+		(row) => `${row.name} ${row.version}  ${row.license}${row.repository ? `  ${row.repository}` : ""}`,
+	),
+	"",
+	"LICENSE AND NOTICE TEXTS",
+	"------------------------",
+];
+
+for (const [index, [, group]] of groups.entries()) {
+	const appliesTo = group.packages.map((entry) => `${entry.name}@${entry.version}`).join(", ");
+	lines.push("", `--- text ${index + 1} ---`, `Applies to: ${appliesTo}`, "", group.text);
+}
+
+if (missingText.length > 0) {
+	lines.push(
+		"",
+		"PACKAGES WITH DECLARED LICENSES BUT NO LICENSE FILE IN THE PACKAGE",
+		"------------------------------------------------------------------",
+		...missingText.map(
+			(row) => `${row.name} ${row.version}  ${row.license}${row.repository ? `  ${row.repository}` : ""}`,
+		),
+		"",
+		"Resolve these notices before publishing a production release.",
+	);
+}
+
+lines.push("");
+mkdirSync(dirname(outputPath), { recursive: true });
+writeFileSync(outputPath, lines.join("\n"), "utf8");
+process.stdout.write(`Wrote ${outputPath} (${packageRows.length} packages, ${groups.length} license texts)\n`);
