@@ -1,6 +1,8 @@
 # Licensing
 
-The final IO project license has **not** been selected. No `LICENSE` file is present, and nothing in this document should be read as choosing one.
+IO is released under the **MIT License**, copyright (c) 2026 Oscar Hugo Paz. The full text is in the repository's [`LICENSE`](../LICENSE) file.
+
+The dependency set is permissive and compatible with MIT. This document records the dependency licenses and the notices that accompany the bundled build.
 
 ## What IO depends on
 
@@ -53,22 +55,22 @@ The production build is a single bundled `dist/` directory. It contains code fro
 - falls back to the Pi SDK MIT text when a Pi package ships no license file,
 - groups packages with an identical license file under one text.
 
-The Homebrew formula installs `dist/`, so `THIRD_PARTY_NOTICES.txt` is installed with the application. CI's smoke test fails if the notices file is missing, empty, or still contains unresolved packages.
+The Homebrew formula installs `dist/`, `package.json`, and `LICENSE`, so the IO license and `THIRD_PARTY_NOTICES.txt` are installed with the application. CI's smoke test fails if the notices file is missing, empty, or still contains unresolved packages.
 
 At the pinned dependency versions, no `NOTICE` files were present inside the installed packages. The collector copies any future `NOTICE` files automatically.
 
-## Constraints for the final project license
+## Compatibility
 
-The dependency set is permissive: MIT, Apache-2.0, BSD-3-Clause, ISC, BlueOak-1.0.0, 0BSD, and Unlicense. There is no copyleft runtime dependency in the current tree.
+The dependency set is permissive: MIT, Apache-2.0, BSD-3-Clause, ISC, BlueOak-1.0.0, 0BSD, and Unlicense. There is no copyleft runtime dependency in the current tree. MIT is compatible with all of them.
 
-Apache-2.0 is compatible with many licenses, but it is **not** compatible with GPLv2-only terms. If the project chooses GPLv2-only, the bundled Apache-2.0 components create a conflict. If the project chooses MIT, Apache-2.0, BSD, ISC, or a compatible copyleft license such as GPLv3, the current tree can be redistributed with the generated notices.
+The Pi SDK is MIT and permits use, modification, sublicensing, and redistribution provided its copyright and permission notice are preserved. Those notices are included in the generated third-party notices.
 
-The Pi SDK is MIT and permits use, modification, sublicensing, and redistribution provided its copyright and permission notice are preserved.
+Apache-2.0 dependencies require their license and any `NOTICE` text to be preserved. The generated notices include the Apache-2.0 license text. No `NOTICE` files were present in the pinned packages; the collector copies them automatically if a future version adds one.
 
-## Before a production release
+## Release checklist
 
-- Decide the IO project license.
-- If the decision requires a `LICENSE` file, add it then; do not add one preemptively.
+- Keep the root `LICENSE` file and `package.json` license synchronized with the project decision.
+- Keep the Homebrew formula's `license "MIT"` declaration and its `LICENSE` installation.
 - Confirm that `dist/THIRD_PARTY_NOTICES.txt` is generated with no unresolved packages.
 - Re-run the dependency license inventory after any SDK or package update.
-- Do not describe IO as MIT, Apache-2.0, or any other license until the decision is recorded.
+- Do not change the project license without reviewing the full dependency inventory again.

@@ -1,6 +1,6 @@
 # Performance
 
-Measured for IO `0.1.0` on 2026-11-07. The `0.1.1` patch changes footer rendering only; the measured startup, memory, and streaming paths are unchanged. The goal is to report what the built application actually does, not to compare it with other tools.
+Measured for IO `0.1.0` on 2026-11-07. The `0.1.1` patch changes footer rendering only and `0.1.2` adds license metadata; the measured startup, memory, and streaming paths are unchanged. The goal is to report what the built application actually does, not to compare it with other tools.
 
 ## Environment
 

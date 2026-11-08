@@ -207,7 +207,9 @@ Do not create a release tag until the application and distribution workflow have
 
 ## License
 
-The project license is pending. No `LICENSE` file has been added yet. Third-party licenses and redistribution constraints are documented in [docs/licensing.md](docs/licensing.md). The build generates and ships `THIRD_PARTY_NOTICES.txt` with the bundled dependencies.
+IO is released under the [MIT License](LICENSE), copyright (c) 2026 Oscar Hugo Paz.
+
+Third-party licenses and redistribution constraints are documented in [docs/licensing.md](docs/licensing.md). The build generates and ships `THIRD_PARTY_NOTICES.txt` with the bundled dependencies. The Homebrew formula installs both files.
 
 ---
 
