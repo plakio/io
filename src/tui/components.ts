@@ -295,8 +295,8 @@ export class ToolBlock extends Container {
 				hiddenNote = undefined;
 			}
 		}
-		const output = visible.join("\n");
-		this.outputView.setText(output.length > 0 ? style.dim(output) : "");
+		const output = visible.map((line) => style.dim(line)).join("\n");
+		this.outputView.setText(output.length > 0 ? output : "");
 
 		const status: string[] = [];
 		if (this.running) {
