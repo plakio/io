@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { IoConfig, IoPaths } from "../config.js";
+import type { IoConfig, IoPaths, ThinkingLevel } from "../config.js";
 import { saveConfig } from "../config.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
@@ -133,6 +133,7 @@ export class IoApp {
 					{ name: "resume", description: "Open another session" },
 					{ name: "name", description: "Rename the current session", argumentHint: "[name]" },
 					{ name: "export", description: "Export the session", argumentHint: "[jsonl|html] [path]" },
+					{ name: "fork", description: "Fork the session from a previous message", argumentHint: "[message]" },
 					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
@@ -391,6 +392,71 @@ export class IoApp {
 			return undefined;
 		}
 
+		if (matchesKey(data, Key.ctrl("p"))) {
+			if (this.activeOverlay) return undefined;
+			if (this.busy) return undefined;
+			void this.cycleModel("forward");
+			return { consume: true };
+		}
+
+		if (matchesKey(data, Key.ctrlShift("p"))) {
+			if (this.activeOverlay) return undefined;
+			if (this.busy) return undefined;
+			void this.cycleModel("backward");
+			return { consume: true };
+		}
+
+		if (matchesKey(data, Key.shift("tab"))) {
+			if (this.activeOverlay) return undefined;
+			if (this.busy) return undefined;
+			const level = this.session.cycleThinkingLevel();
+			if (level) {
+				this.addNotice(`effort: ${level}`, { dim: true });
+				this.config = { ...this.config, thinkingLevel: level };
+				try {
+					saveConfig(this.options.paths, this.config);
+				} catch (error) {
+					this.addNotice(`warning: could not save effort preference: ${(error as Error).message}`, {
+						bold: true,
+					});
+				}
+			}
+			return { consume: true };
+		}
+
+		if (matchesKey(data, Key.alt("enter"))) {
+			if (this.activeOverlay) return undefined;
+			if (this.busy || this.session.isStreaming) {
+				const text = this.editor.getText();
+				if (text.trim().length === 0) {
+					this.addNotice("Type your follow-up now; it will be sent when the current response finishes.", {
+						dim: true,
+					});
+					return { consume: true };
+				}
+				this.editor.setText("");
+				void this.session.prompt(text, { streamingBehavior: "followUp" }).catch((error) => {
+					this.addNotice(`could not queue follow-up: ${(error as Error).message}`, { bold: true });
+				});
+				this.addNotice("follow-up queued", { dim: true });
+				return { consume: true };
+			}
+			return undefined;
+		}
+
+		if (matchesKey(data, Key.alt("up"))) {
+			if (this.activeOverlay) return undefined;
+			const queued = this.session.clearQueue();
+			const combined = [...queued.steering, ...queued.followUp].join("\n\n");
+			if (combined) {
+				this.editor.setText(combined);
+				this.addNotice("queued messages restored to the editor", { dim: true });
+			}
+			this.queued = 0;
+			this.updateFooter();
+			return { consume: true };
+		}
+
 		if (matchesKey(data, Key.ctrl("o"))) {
 			if (this.activeOverlay) return undefined;
 			this.toolOutputExpanded = !this.toolOutputExpanded;
@@ -415,6 +481,24 @@ export class IoApp {
 		return undefined;
 	}
 
+	private async sendPrompt(text: string, options: { followUp?: boolean } = {}): Promise<void> {
+		try {
+			if (this.session.isStreaming) {
+				if (!options.followUp) {
+					this.status = "queued";
+					this.updateFooter();
+				}
+				await this.session.prompt(text, { streamingBehavior: "followUp" });
+			} else {
+				await this.session.prompt(text);
+			}
+		} catch (error) {
+			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
+			this.status = undefined;
+			this.updateFooter();
+		}
+	}
+
 	private handleSubmit(text: string): void {
 		if (this.exiting) return;
 		const prompt = text;
@@ -426,22 +510,6 @@ export class IoApp {
 			return;
 		}
 		void this.sendPrompt(prompt);
-	}
-
-	private async sendPrompt(prompt: string): Promise<void> {
-		try {
-			if (this.session.isStreaming) {
-				this.status = "queued";
-				this.updateFooter();
-				await this.session.prompt(prompt, { streamingBehavior: "followUp" });
-			} else {
-				await this.session.prompt(prompt);
-			}
-		} catch (error) {
-			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
-			this.status = undefined;
-			this.updateFooter();
-		}
 	}
 
 	private async handleCommand(input: string): Promise<void> {
@@ -490,6 +558,9 @@ export class IoApp {
 				return;
 			case "/export":
 				await this.exportSession(argument || undefined);
+				return;
+			case "/fork":
+				await this.forkSession();
 				return;
 			case "/models":
 				await this.listModels();
@@ -606,7 +677,7 @@ export class IoApp {
 		}
 	}
 
-	private async switchToHarness(replacement: { harness: Harness; model?: Model<any>; thinkingLevel?: string }): Promise<void> {
+	private async switchToHarness(replacement: { harness: Harness; model?: Model<any>; thinkingLevel?: ThinkingLevel }): Promise<void> {
 		const old = this.session;
 		this.session = replacement.harness.session;
 		this.options = { ...this.options, harness: replacement.harness };
@@ -758,6 +829,89 @@ export class IoApp {
 		}
 	}
 
+	private async forkSession(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before forking.", { dim: true });
+			return;
+		}
+		const messages = this.session.getUserMessagesForForking();
+		if (messages.length === 0) {
+			this.addNotice("No user messages to fork from.", { dim: true });
+			return;
+		}
+		if (messages.length === 1) {
+			await this.doFork(messages[0]!);
+			return;
+		}
+		this.status = "selecting fork point";
+		this.updateFooter();
+		const items = messages.slice(-20).map((entry, index) => ({
+			value: entry.entryId,
+			label: `${index + 1}. ${oneLine(entry.text, 55)}`,
+			description: "",
+		}));
+		const list = new SelectList(items, Math.min(14, items.length), selectListTheme);
+		const box = new Container();
+		box.addChild(new Text(style.bold("Select a message to fork from"), 0, 0));
+		box.addChild(new Spacer(1));
+		box.addChild(list);
+		box.addChild(new Spacer(1));
+		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+		list.onSelect = async (item) => {
+			this.closeOverlay();
+			const entry = messages.find((message) => message.entryId === item.value);
+			if (entry) await this.doFork(entry);
+		};
+		list.onCancel = () => {
+			this.status = undefined;
+			this.closeOverlay();
+			this.updateFooter();
+		};
+		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+			anchor: "center",
+			width: this.tui.terminal.columns,
+			maxHeight: "70%",
+			margin: 0,
+		});
+		this.tui.setFocus(list);
+		this.tui.requestRender();
+	}
+
+	private async doFork(entry: { entryId: string; text: string }): Promise<void> {
+		this.status = "forking";
+		this.updateFooter();
+		try {
+			const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+			const sessionFile = this.session.sessionFile;
+			if (!sessionFile) {
+				this.addNotice("Session is not persisted yet; cannot fork.", { dim: true });
+				return;
+			}
+			const newManager = SessionManager.forkFrom(
+				sessionFile,
+				this.options.cwd,
+				this.options.paths.sessionsDir,
+			);
+			const replacement = await replaceHarnessSession(this.options.harness, {
+				cwd: this.options.cwd,
+				paths: this.options.paths,
+				modelRuntime: this.options.runtime,
+				confirmCommand: this.getConfirmCommand(),
+				model: this.session.model ?? undefined,
+				thinkingLevel: this.session.thinkingLevel ?? undefined,
+				sessionId: newManager.getSessionId(),
+			});
+			await this.switchToHarness(replacement);
+			this.editor.setText(entry.text);
+			this.addNotice(`forked from message · ${oneLine(entry.text, 60)}`, { dim: true });
+		} catch (error) {
+			this.addNotice(`could not fork: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = undefined;
+			this.updateFooter();
+		}
+	}
+
 	private async showModelPicker(): Promise<void> {
 		if (this.activeOverlay) return;
 		this.status = "loading models";
@@ -827,6 +981,36 @@ export class IoApp {
 		this.activeOverlay = undefined;
 		this.tui.setFocus(this.editor);
 		this.tui.requestRender();
+	}
+
+	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before changing models.", { dim: true });
+			return;
+		}
+		this.status = "loading models";
+		this.updateFooter();
+		try {
+			const available = await loadAvailableModels(this.options.runtime);
+			const models = available.models;
+			if (models.length <= 1) {
+				this.addNotice("Only one authenticated model available.", { dim: true });
+				return;
+			}
+			const current = this.session.model;
+			const currentIndex = current ? models.findIndex((model) => model.provider === current.provider && model.id === current.id) : -1;
+			const nextIndex = direction === "forward"
+				? (currentIndex + 1) % models.length
+				: (currentIndex - 1 + models.length) % models.length;
+			const next = models[nextIndex];
+			if (!next) return;
+			await this.applyModel(next);
+		} catch (error) {
+			this.addNotice(`could not cycle model: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = undefined;
+			this.updateFooter();
+		}
 	}
 
 	private async setModelByReference(reference: string): Promise<void> {
