@@ -15,11 +15,15 @@ import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths } from "../config.js";
 import { saveConfig } from "../config.js";
-import { formatContext, formatCount, formatSpeed, formatTokens, shortSessionId } from "../format.js";
+import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
 import { modelReference, parseModelReference } from "../providers.js";
 import { loadAvailableModels } from "../runtime.js";
-import type { ConfirmCommand, Harness } from "../session.js";
+import {
+	replaceHarnessSession,
+	type ConfirmCommand,
+	type Harness,
+} from "../session.js";
 import { VERSION } from "../version.js";
 import { AssistantBlock, ConfirmOverlay, Footer, NoticeBlock, PaddedBox, ToolBlock, UserBlock } from "./components.js";
 import { IoEditor } from "./editor.js";
@@ -72,13 +76,13 @@ function messageText(message: { content?: unknown }): string {
 }
 
 export class IoApp {
-	private readonly options: IoAppOptions;
+	private options: IoAppOptions;
 	private readonly tui: TuiMainScreen;
 	private readonly header: Text;
 	private readonly transcript: Container;
 	private readonly editor: IoEditor;
 	private readonly footer: Footer;
-	private readonly session: Harness["session"];
+	private session: Harness["session"];
 	private unsubscribe: (() => void) | undefined;
 	private resolveExit: ((code: number) => void) | undefined;
 	private exiting = false;
@@ -124,6 +128,11 @@ export class IoApp {
 					{ name: "model", description: "Select or set a model", argumentHint: "[provider/model]" },
 					{ name: "models", description: "List authenticated models" },
 					{ name: "effort", description: "Select or set thinking effort", argumentHint: "[level]" },
+					{ name: "compact", description: "Compact the session context" },
+					{ name: "new", description: "Start a new session" },
+					{ name: "resume", description: "Open another session" },
+					{ name: "name", description: "Rename the current session", argumentHint: "[name]" },
+					{ name: "export", description: "Export the session", argumentHint: "[jsonl|html] [path]" },
 					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
@@ -152,6 +161,7 @@ export class IoApp {
 	}
 
 	private subscribe(): void {
+		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe((event) => {
 			try {
 				this.handleEvent(event);
@@ -462,6 +472,25 @@ export class IoApp {
 					await this.applyEffort(argument);
 				}
 				return;
+			case "/compact":
+				await this.compactSession();
+				return;
+			case "/new":
+				await this.newSession();
+				return;
+			case "/resume":
+				await this.resumeSession();
+				return;
+			case "/name":
+				if (!argument) {
+					this.addNotice("usage: /name <name>", { dim: true });
+				} else {
+					this.setSessionName(argument);
+				}
+				return;
+			case "/export":
+				await this.exportSession(argument || undefined);
+				return;
 			case "/models":
 				await this.listModels();
 				return;
@@ -556,6 +585,176 @@ export class IoApp {
 			this.updateFooter();
 		} catch (error) {
 			this.addNotice(`could not set effort: ${(error as Error).message}`, { bold: true });
+		}
+	}
+
+	private async compactSession(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before compacting.", { dim: true });
+			return;
+		}
+		this.status = "compacting";
+		this.updateFooter();
+		try {
+			const result = await this.session.compact();
+			this.addNotice("context compacted", { dim: true });
+		} catch (error) {
+			this.addNotice(`could not compact: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = undefined;
+			this.updateFooter();
+		}
+	}
+
+	private async switchToHarness(replacement: { harness: Harness; model?: Model<any>; thinkingLevel?: string }): Promise<void> {
+		const old = this.session;
+		this.session = replacement.harness.session;
+		this.options = { ...this.options, harness: replacement.harness };
+		this.subscribe();
+		this.transcript.clear();
+		this.toolBlocks = [];
+		this.activeTools.clear();
+		this.activeAssistant = undefined;
+		this.lastUsage = undefined;
+		this.lastDurationMs = undefined;
+		this.busy = false;
+		this.status = undefined;
+		this.queued = 0;
+		this.renderInitialState();
+		old.dispose();
+		this.updateFooter();
+		this.addNotice("switched session", { dim: true });
+	}
+
+	private async newSession(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before starting a new session.", { dim: true });
+			return;
+		}
+		this.status = "starting new session";
+		this.updateFooter();
+		try {
+			const replacement = await replaceHarnessSession(this.options.harness, {
+				cwd: this.options.cwd,
+				paths: this.options.paths,
+				modelRuntime: this.options.runtime,
+				confirmCommand: this.options.harness ? this.getConfirmCommand() : undefined,
+				model: this.session.model ?? undefined,
+				thinkingLevel: this.session.thinkingLevel ?? undefined,
+			});
+			await this.switchToHarness(replacement);
+		} catch (error) {
+			this.addNotice(`could not start a new session: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = undefined;
+			this.updateFooter();
+		}
+	}
+
+	private async resumeSession(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before switching sessions.", { dim: true });
+			return;
+		}
+		this.status = "loading sessions";
+		this.updateFooter();
+		try {
+			const { listSessions } = await import("../session.js");
+			const sessions = await listSessions(this.options.paths, this.options.cwd);
+			if (sessions.length === 0) {
+				this.addNotice("No sessions for this directory.", { dim: true });
+				return;
+			}
+			if (sessions.length === 1) {
+				const selected = sessions[0];
+				if (!selected) return;
+				const replacement = await replaceHarnessSession(this.options.harness, {
+					cwd: this.options.cwd,
+					paths: this.options.paths,
+					modelRuntime: this.options.runtime,
+					confirmCommand: this.getConfirmCommand(),
+					model: this.session.model ?? undefined,
+					thinkingLevel: this.session.thinkingLevel ?? undefined,
+					sessionId: selected.id,
+				});
+				await this.switchToHarness(replacement);
+				return;
+			}
+			const items = sessions.slice(0, 20).map((session, index) => ({
+				value: session.id,
+				label: `${session.id.slice(0, 12)} · ${session.modified.toISOString().slice(0, 10)}`,
+				description: `${session.messageCount} msgs · ${oneLine(session.firstMessage || session.name || "(no messages)", 40)}`,
+			}));
+			const list = new SelectList(items, Math.min(14, items.length), selectListTheme);
+			const box = new Container();
+			box.addChild(new Text(style.bold("Select a session"), 0, 0));
+			box.addChild(new Spacer(1));
+			box.addChild(list);
+			box.addChild(new Spacer(1));
+			box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+			list.onSelect = async (item) => {
+				this.closeOverlay();
+				const selected = sessions.find((session) => session.id === item.value);
+				if (!selected) return;
+				const replacement = await replaceHarnessSession(this.options.harness, {
+					cwd: this.options.cwd,
+					paths: this.options.paths,
+					modelRuntime: this.options.runtime,
+					confirmCommand: this.getConfirmCommand(),
+					model: this.session.model ?? undefined,
+					thinkingLevel: this.session.thinkingLevel ?? undefined,
+					sessionId: selected.id,
+				});
+				await this.switchToHarness(replacement);
+			};
+			list.onCancel = () => {
+				this.status = undefined;
+				this.closeOverlay();
+				this.updateFooter();
+			};
+			this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+				anchor: "center",
+				width: this.tui.terminal.columns,
+				maxHeight: "70%",
+				margin: 0,
+			});
+			this.tui.setFocus(list);
+			this.tui.requestRender();
+		} catch (error) {
+			this.addNotice(`could not load sessions: ${(error as Error).message}`, { bold: true });
+		} finally {
+			if (!this.activeOverlay) {
+				this.status = undefined;
+				this.updateFooter();
+			}
+		}
+	}
+
+	private setSessionName(name: string): void {
+		try {
+			this.session.setSessionName(name);
+			this.addNotice(`session name: ${name}`, { dim: true });
+		} catch (error) {
+			this.addNotice(`could not rename session: ${(error as Error).message}`, { bold: true });
+		}
+	}
+
+	private async exportSession(argument?: string): Promise<void> {
+		const match = argument?.trim().match(/^(\S+)(?:\s+(\S+))?/);
+		const format = (match?.[1] || "html").toLowerCase();
+		const outputPath = match?.[2];
+		try {
+			if (format === "jsonl" || format === "json") {
+				const file = this.session.exportToJsonl(outputPath);
+				this.addNotice(`exported session: ${file}`, { dim: true });
+			} else if (format === "html") {
+				const file = await this.session.exportToHtml(outputPath);
+				this.addNotice(`exported session: ${file}`, { dim: true });
+			} else {
+				this.addNotice("usage: /export [jsonl|html] [path]", { dim: true });
+			}
+		} catch (error) {
+			this.addNotice(`could not export session: ${(error as Error).message}`, { bold: true });
 		}
 	}
 

@@ -116,6 +116,48 @@ export interface Harness {
 	modelFallbackMessage?: string;
 }
 
+export interface ReplaceHarnessOptions {
+	cwd: string;
+	paths: IoPaths;
+	modelRuntime: ModelRuntime;
+	confirmCommand?: ConfirmCommand;
+	model?: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
+	continueSession?: boolean;
+	sessionId?: string;
+}
+
+export interface SessionReplacement {
+	harness: Harness;
+	model: Model<Api> | undefined;
+	thinkingLevel: ThinkingLevel | undefined;
+}
+
+/**
+ * Create a fresh harness for a new or resumed session. Used by /new, /resume,
+ * and /fork. The caller must dispose the old harness after switching.
+ */
+export async function replaceHarnessSession(
+	current: Harness,
+	options: ReplaceHarnessOptions,
+): Promise<SessionReplacement> {
+	const model = options.model ?? current.session.model;
+	const thinkingLevel = options.thinkingLevel ?? current.session.thinkingLevel;
+
+	const harness = await createHarness({
+		cwd: options.cwd,
+		paths: options.paths,
+		modelRuntime: options.modelRuntime,
+		model: model as Model<Api>,
+		thinkingLevel,
+		confirmCommand: options.confirmCommand,
+		continueSession: options.continueSession,
+		sessionId: options.sessionId,
+	});
+
+	return { harness, model, thinkingLevel };
+}
+
 export async function createHarness(options: HarnessOptions): Promise<Harness> {
 	const resolved = options.sessionManager
 		? {
