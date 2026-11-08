@@ -10,6 +10,8 @@ export interface IoConfig {
 	provider?: string;
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
+	primaryAgent?: string;
+	agents?: Record<string, { model?: string }>;
 }
 
 export interface IoPaths {
@@ -80,6 +82,25 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		config.thinkingLevel = input.thinkingLevel;
 	} else if (input.thinkingLevel !== undefined) {
 		warnings.push("ignoring invalid config value: thinkingLevel");
+	}
+	if (typeof input.primaryAgent === "string" && input.primaryAgent.length > 0) {
+		config.primaryAgent = input.primaryAgent;
+	} else if (input.primaryAgent !== undefined) {
+		warnings.push("ignoring invalid config value: primaryAgent");
+	}
+	if (input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)) {
+		const agents: NonNullable<IoConfig["agents"]> = {};
+		for (const [id, value] of Object.entries(input.agents as Record<string, unknown>)) {
+			if (value && typeof value === "object" && !Array.isArray(value)) {
+				const model = (value as Record<string, unknown>).model;
+				if (typeof model === "string" && model.length > 0) {
+					agents[id] = { model };
+				}
+			}
+		}
+		config.agents = Object.keys(agents).length > 0 ? agents : undefined;
+	} else if (input.agents !== undefined) {
+		warnings.push("ignoring invalid config value: agents");
 	}
 	return { config, warnings };
 }

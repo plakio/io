@@ -10,8 +10,10 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { IoPaths, ThinkingLevel } from "./config.js";
+import { DEFAULT_AGENTS, getAgent, canDelegate, isReadonlyAccess, type AgentCatalog, type AgentDefinition } from "./agents.js";
 import { assessCommand, sanitizeBashEnvironment } from "./safety.js";
 import { buildIoSystemPrompt } from "./system-prompt.js";
+import { createSubagentTool } from "./subagent-tool.js";
 import { VERSION } from "./version.js";
 
 export interface SessionFile {
@@ -105,6 +107,9 @@ export interface HarnessOptions {
 	settingsManager?: SettingsManager;
 	confirmCommand?: ConfirmCommand;
 	systemPrompt?: string;
+	tools?: ToolDefinition[];
+	agent?: AgentDefinition;
+	agentCatalog?: AgentCatalog;
 }
 
 export interface Harness {
@@ -114,6 +119,8 @@ export interface Harness {
 	resumed: boolean;
 	sessionFile?: SessionFile;
 	modelFallbackMessage?: string;
+	agent: AgentDefinition;
+	agentCatalog: AgentCatalog;
 }
 
 export interface ReplaceHarnessOptions {
@@ -153,6 +160,7 @@ export async function replaceHarnessSession(
 		confirmCommand: options.confirmCommand,
 		continueSession: options.continueSession,
 		sessionId: options.sessionId,
+		agentCatalog: current.agentCatalog,
 	});
 
 	return { harness, model, thinkingLevel };
@@ -196,6 +204,22 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		}),
 	});
 
+	const catalog = options.agentCatalog ?? DEFAULT_AGENTS;
+	const agent = options.agent ?? getAgent(catalog, catalog.primary) ?? getAgent(catalog, "build") ?? DEFAULT_AGENTS.agents[0]!;
+	const extraTools: ToolDefinition[] = [...(options.tools ?? [])];
+	if (canDelegate(agent)) {
+		extraTools.push(
+			createSubagentTool({
+				cwd: options.cwd,
+				paths: options.paths,
+				modelRuntime: options.modelRuntime,
+				currentModel: options.model,
+				catalog,
+				confirmCommand: options.confirmCommand,
+			}) as unknown as ToolDefinition,
+		);
+	}
+
 	const created = await createAgentSession({
 		cwd: options.cwd,
 		agentDir: options.paths.dataDir,
@@ -206,7 +230,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		sessionManager: resolved.manager,
 		settingsManager,
 		tools: ["bash"],
-		customTools: [bashTool] as unknown as ToolDefinition[],
+		customTools: [bashTool, ...extraTools] as unknown as ToolDefinition[],
 	});
 
 	const session = created.session;
@@ -243,5 +267,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		resumed: options.sessionId !== undefined || (options.continueSession === true && hadExistingMessages),
 		sessionFile: resolved.session,
 		modelFallbackMessage: created.modelFallbackMessage,
+		agent,
+		agentCatalog: catalog,
 	};
 }
