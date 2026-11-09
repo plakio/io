@@ -1,3 +1,5 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
+
 export interface UsageNumbers {
 	input: number;
 	output: number;
@@ -60,4 +62,21 @@ export function oneLine(value: string, maxLength: number): string {
 	if (normalized.length <= maxLength) return normalized;
 	const cut = normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd();
 	return `${cut}…`;
+}
+
+/**
+ * Render cwd in the footer the way Pi does: `$HOME` becomes `~` and anything
+ * outside home stays absolute (`~/io`, `/tmp/x`). Used for the `~/io (main)`
+ * bottom-bar label.
+ */
+export function formatCwdForFooter(cwd: string, home: string | undefined): string {
+	if (!home) return cwd;
+	const resolvedCwd = resolve(cwd);
+	const resolvedHome = resolve(home);
+	const relativeToHome = relative(resolvedHome, resolvedCwd);
+	const isInsideHome =
+		relativeToHome === "" ||
+		(relativeToHome !== ".." && !relativeToHome.startsWith(`..${sep}`) && !isAbsolute(relativeToHome));
+	if (!isInsideHome) return cwd;
+	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }

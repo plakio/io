@@ -1,26 +1,36 @@
-import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Model, Usage } from "@earendil-works/pi-ai";
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { collectImageAttachments } from "../images.js";
+import { formatCwdForFooter } from "../format.js";
+import { getGitBranch } from "../git-diff.js";
 import {
 	CombinedAutocompleteProvider,
 	Container,
 	Key,
 	fuzzyFilter,
+	getNativeClipboard,
 	matchesKey,
 	ProcessTerminal,
 	SelectList,
 	Spacer,
 	Text,
 	TuiMainScreen,
+	stripTerminalSequences,
 	type OverlayHandle,
 	type ProgramStatus,
 } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths, ThinkingLevel } from "../config.js";
-import { saveConfig } from "../config.js";
+import { ensureIoDirectories, loadConfig, saveConfig } from "../config.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
-import { modelReference, parseModelReference } from "../providers.js";
+import { modelReference, parseModelReference, providerName } from "../providers.js";
 import { refreshCatalogs, loadAvailableModels } from "../runtime.js";
+import { GITHUB_REPOSITORY, compareVersions, fetchLatestRelease } from "../update.js";
 import {
 	replaceHarnessSession,
 	type ConfirmCommand,
@@ -36,6 +46,8 @@ import {
 	ModelPicker,
 	NoticeBlock,
 	PaddedBox,
+	ScopedModelsPicker,
+	SessionPicker,
 	ToolBlock,
 	UserBlock,
 	modelSearchText,
@@ -48,7 +60,13 @@ const HELP = `Commands
   /help            Show this help
   /model [ref]     Select a model, or set provider/model directly
   /models          List authenticated models
+  /scope           Select models that Ctrl+P cycles through
   /effort [level]  Select or set thinking effort
+  /copy            Copy the last assistant response
+  /debug           Write UI/session diagnostics to a log file
+  /reload          Reload config, session resources, and model catalogs
+  /update          Check for a newer io release
+  /editor          Compose the prompt in $EDITOR
   /diff [path]     Show git status, stat, and patch
   /session         Show session details and token usage
   /login           Show authentication instructions
@@ -60,7 +78,9 @@ Keys
   Shift+Enter       Insert newline (Ctrl+J also works)
   Esc or Ctrl+C     Cancel generation
   Ctrl+C twice      Exit when the prompt is empty
-  Ctrl+O            Expand or collapse tool output`;
+  Ctrl+O            Expand or collapse tool output
+  Ctrl+T            Show or hide model reasoning
+  Ctrl+G            Compose in your editor ($EDITOR → micro → nano → vim)`;
 
 interface IoAppOptions {
 	cwd: string;
@@ -110,8 +130,17 @@ export class IoApp {
 	private activeAssistant: AssistantBlock | undefined;
 	private activeOverlay: OverlayHandle | undefined;
 	private toolOutputExpanded = false;
+	private activity = { commands: 0, edits: 0, reads: 0, thoughts: 0, subagents: 0 };
+	private thinkingCounts = new Map<number, number>();
+	private activeAssistantIndex = -1;
+	private cwdLabel = "";
+	private branch: string | undefined;
+	private lastBranchCheck = 0;
 	private lastCtrlC = 0;
 	private config: IoConfig;
+	private thinkingVisible = false;
+	private assistantBlocks: AssistantBlock[] = [];
+	private lastAssistantText = "";
 	private programDone = false;
 	private programError: string | undefined;
 	private awaitingConfirm = false;
@@ -125,6 +154,10 @@ export class IoApp {
 		this.options = options;
 		this.session = options.harness.session;
 		this.config = { ...options.config };
+		const branchNow = getGitBranch(options.cwd);
+		this.branch = branchNow;
+		this.cwdLabel = formatCwdForFooter(options.cwd, homedir());
+		this.lastBranchCheck = Date.now();
 		this.tui = new TuiMainScreen(new ProcessTerminal());
 		this.header = new Text(
 			`${style.bold("io")}${style.dim(` ${VERSION}`)}\n${style.dim(options.cwd)}`,
@@ -200,7 +233,9 @@ export class IoApp {
 			} else if (message.role === "assistant") {
 				const block = new AssistantBlock(() => this.tui.requestRender());
 				block.setMessage(message, false);
+				block.setThinkingVisible(this.thinkingVisible);
 				if (block.getText().trim()) this.addBlock(block);
+				this.assistantBlocks.push(block);
 				const assistant = message as AssistantMessage;
 				if (assistant.usage) {
 					this.lastUsage = assistant.usage;
@@ -258,13 +293,19 @@ export class IoApp {
 				} else if (event.message.role === "assistant") {
 					const block = new AssistantBlock(() => this.tui.requestRender());
 					block.setMessage(event.message, true);
+					block.setThinkingVisible(this.thinkingVisible);
 					this.addBlock(block);
 					this.activeAssistant = block;
+					this.activeAssistantIndex = this.assistantBlocks.length;
+					this.assistantBlocks.push(block);
 				}
 				break;
 			case "message_update":
 				if (event.message.role === "assistant" && this.activeAssistant) {
 					this.activeAssistant.setMessage(event.message, true);
+					if (this.updateThinkingCount(event.message as AssistantMessage)) {
+						this.updateFooter();
+					}
 				}
 				break;
 			case "message_end":
@@ -272,6 +313,10 @@ export class IoApp {
 					const assistant = event.message as AssistantMessage;
 					this.activeAssistant?.setMessage(assistant, false);
 					this.activeAssistant = undefined;
+					this.updateThinkingCount(assistant);
+					this.activeAssistantIndex = -1;
+					const response = messageText(event.message).trim();
+					if (response.length > 0) this.lastAssistantText = response;
 					if (assistant.usage) {
 						this.lastUsage = assistant.usage;
 						this.lastDurationMs = assistant.durationMs;
@@ -292,7 +337,8 @@ export class IoApp {
 				const block = new ToolBlock(event.toolName, command, () => this.tui.requestRender());
 				this.toolBlocks.push(block);
 				this.activeTools.set(event.toolCallId, block);
-				this.status = `running ${event.toolName}`;
+				this.bumpActivity(event.toolName);
+				this.status = this.toolStatusLabel(event.toolName, command);
 				this.addBlock(block);
 				this.updateFooterAndTitle();
 				break;
@@ -429,11 +475,57 @@ export class IoApp {
 		this.updateSpinnerTimer();
 	}
 
+	private updateThinkingCount(message: AssistantMessage): boolean {
+		const index = this.activeAssistantIndex;
+		if (index < 0) return false;
+		const count = message.content.filter((block) => block.type === "thinking").length;
+		const previous = this.thinkingCounts.get(index) ?? 0;
+		if (count === previous) return false;
+		this.thinkingCounts.set(index, count);
+		this.activity.thoughts += count - previous;
+		return true;
+	}
+
+	private bumpActivity(toolName: string): void {
+		if (toolName === "bash" || toolName.includes("shell")) {
+			this.activity.commands += 1;
+		} else if (toolName === "edit" || toolName === "write" || toolName === "apply_patch") {
+			this.activity.edits += 1;
+		} else if (
+			toolName === "read" ||
+			toolName === "grep" ||
+			toolName === "glob" ||
+			toolName === "ls" ||
+			toolName === "find" ||
+			toolName === "cat" ||
+			toolName === "search"
+		) {
+			this.activity.reads += 1;
+		} else if (toolName === "subagent") {
+			this.activity.subagents += 1;
+		}
+	}
+
+	private toolStatusLabel(toolName: string, _command: string): string {
+		if (toolName === "bash" || toolName.includes("shell")) return "running shell";
+		if (toolName === "subagent") return "running subagent";
+		return `running ${toolName}`;
+	}
+
 	private updateFooter(): void {
 		const model = this.session.model ?? this.options.model;
 		const stats = this.session.getSessionStats();
 		const streaming = this.busy || this.session.isStreaming;
+		const totals = stats.tokens;
+		const promptDenominator = totals.input + totals.cacheRead + totals.cacheWrite;
+		const now = Date.now();
+		if (now - this.lastBranchCheck > 10_000) {
+			this.lastBranchCheck = now;
+			this.branch = getGitBranch(this.options.cwd);
+		}
 		this.footer.setState({
+			cwd: this.cwdLabel,
+			branch: this.branch,
 			modelRef: model ? modelReference(model as Model<any>) : undefined,
 			usage: this.lastUsage,
 			speed: this.lastUsage ? formatSpeed(this.lastUsage.output, this.lastDurationMs) : undefined,
@@ -443,6 +535,10 @@ export class IoApp {
 			status: this.status,
 			spinner: streaming ? this.spinnerFrames[this.spinnerIndex] : undefined,
 			queued: this.queued,
+			totals,
+			cost: stats.cost > 0 ? stats.cost : undefined,
+			cacheHit: promptDenominator > 0 ? (totals.cacheRead / promptDenominator) * 100 : undefined,
+			activity: { ...this.activity },
 		});
 		this.tui.requestRender();
 	}
@@ -564,6 +660,31 @@ export class IoApp {
 			return { consume: true };
 		}
 
+		if (matchesKey(data, Key.ctrl("t"))) {
+			if (this.activeOverlay) return undefined;
+			this.thinkingVisible = !this.thinkingVisible;
+			for (const block of this.assistantBlocks) block.setThinkingVisible(this.thinkingVisible);
+			this.status = this.thinkingVisible ? "thinking shown" : "thinking hidden";
+			this.updateFooterAndTitle();
+			setTimeout(() => {
+				if (this.status === "thinking shown" || this.status === "thinking hidden") {
+					this.status = this.busy ? "generating" : undefined;
+					this.updateFooterAndTitle();
+				}
+			}, 1500).unref?.();
+			return { consume: true };
+		}
+
+		if (matchesKey(data, Key.ctrl("g"))) {
+			if (this.activeOverlay) return undefined;
+			if (this.busy || this.session.isStreaming) {
+				this.addNotice("Wait for the current response to finish before opening the editor.", { dim: true });
+				return { consume: true };
+			}
+			void this.openExternalEditor();
+			return { consume: true };
+		}
+
 		if (matchesKey(data, Key.ctrl("d")) && !this.activeOverlay) {
 			if (!this.busy && this.editor.getText().length === 0) {
 				this.exit(0);
@@ -573,16 +694,20 @@ export class IoApp {
 		return undefined;
 	}
 
-	private async sendPrompt(text: string, options: { followUp?: boolean } = {}): Promise<void> {
+	private async sendPrompt(text: string, options: { followUp?: boolean; images?: ImageContent[] } = {}): Promise<void> {
+		const promptOptions = {
+			...(options.followUp ? { streamingBehavior: "followUp" as const } : {}),
+			...(options.images && options.images.length > 0 ? { images: options.images } : {}),
+		};
 		try {
 			if (this.session.isStreaming) {
 				if (!options.followUp) {
 					this.status = "queued";
 					this.updateFooterAndTitle();
 				}
-				await this.session.prompt(text, { streamingBehavior: "followUp" });
+				await this.session.prompt(text, promptOptions);
 			} else {
-				await this.session.prompt(text);
+				await this.session.prompt(text, promptOptions);
 			}
 		} catch (error) {
 			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
@@ -601,7 +726,62 @@ export class IoApp {
 			void this.handleCommand(prompt.trim());
 			return;
 		}
-		void this.sendPrompt(prompt);
+		if (prompt.trimStart().startsWith("!")) {
+			void this.runInlineShell(prompt.trimStart());
+			return;
+		}
+		const attachments = collectImageAttachments(prompt, this.options.cwd);
+		if (attachments.length > 0) {
+			const names = attachments.map((attachment) => attachment.path.split("/").pop() ?? attachment.path);
+			this.addNotice(`attached ${names.join(", ")}`, { dim: true });
+		}
+		void this.sendPrompt(prompt, {
+			images: attachments.map((attachment) => attachment.content),
+		});
+	}
+
+	private async runInlineShell(text: string): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before running a shell command.", { dim: true });
+			this.editor.setText(text);
+			return;
+		}
+		const excluded = text.startsWith("!!");
+		const command = text.slice(excluded ? 2 : 1).trim();
+		if (command.length === 0) {
+			this.addNotice("usage: `!command` includes output in context, `!!command` does not", { dim: true });
+			return;
+		}
+		this.status = "running shell";
+		this.updateFooterAndTitle();
+		const started = Date.now();
+		const block = new ToolBlock("bash", command, () => this.tui.requestRender());
+		this.toolBlocks.push(block);
+		this.addBlock(block);
+		let output = "";
+		try {
+			const result = await this.session.executeBash(
+				command,
+				(chunk) => {
+					output += chunk;
+					block.setPartial({ content: [{ type: "text", text: output }] });
+				},
+				{ excludeFromContext: excluded },
+			);
+			const durationMs = Date.now() - started;
+			const isError = (result.exitCode ?? 0) !== 0 || result.cancelled;
+			const details: Record<string, unknown> = {};
+			if (result.fullOutputPath) details.fullOutputPath = result.fullOutputPath;
+			block.setResult(
+				{ content: [{ type: "text", text: result.output || output }], details },
+				isError,
+				durationMs,
+			);
+			this.updateFooterAndTitle();
+		} catch (error) {
+			block.setResult(undefined, true, Date.now() - started);
+			this.addNotice(`could not run shell command: ${(error as Error).message}`, { bold: true });
+		}
 	}
 
 	private async handleCommand(input: string): Promise<void> {
@@ -627,6 +807,9 @@ export class IoApp {
 					await this.setModelByReference(argument);
 				}
 				return;
+			case "/scope":
+				await this.showScopePicker();
+				return;
 			case "/effort":
 			case "/thinking":
 				if (!argument) {
@@ -643,6 +826,15 @@ export class IoApp {
 				return;
 			case "/resume":
 				await this.resumeSession();
+				return;
+			case "/reload":
+				await this.reloadResources();
+				return;
+			case "/update":
+				await this.checkForUpdate();
+				return;
+			case "/editor":
+				void this.openExternalEditor();
 				return;
 			case "/name":
 				if (!argument) {
@@ -662,6 +854,12 @@ export class IoApp {
 				return;
 			case "/diff":
 				await this.showDiff(argument || undefined);
+				return;
+			case "/copy":
+				this.copyLastAssistant();
+				return;
+			case "/debug":
+				this.writeDebugLog();
 				return;
 			case "/session":
 				this.showSessionInfo();
@@ -784,6 +982,7 @@ export class IoApp {
 					{ name: "help", description: "Show commands and keys" },
 					{ name: "model", description: "Select or set a model", argumentHint: "[provider/model]" },
 					{ name: "models", description: "List authenticated models" },
+					{ name: "scope", description: "Select models Ctrl+P cycles through" },
 					{ name: "effort", description: "Select or set thinking effort", argumentHint: "[level]" },
 					{ name: "compact", description: "Compact the session context" },
 					{ name: "new", description: "Start a new session" },
@@ -797,6 +996,11 @@ export class IoApp {
 						description: `${agent.name} agent (${agent.kind})`,
 					})),
 					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
+					{ name: "copy", description: "Copy the last assistant response" },
+					{ name: "debug", description: "Write diagnostics to a log file" },
+					{ name: "reload", description: "Reload config, session resources, and model catalogs" },
+					{ name: "update", description: "Check for a newer io release" },
+					{ name: "editor", description: "Compose the prompt in $EDITOR" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
 					{ name: "quit", description: "Exit io" },
@@ -826,6 +1030,10 @@ export class IoApp {
 		this.programDone = false;
 		this.programError = undefined;
 		this.awaitingConfirm = false;
+		this.activity = { commands: 0, edits: 0, reads: 0, thoughts: 0, subagents: 0 };
+		this.thinkingCounts.clear();
+		this.assistantBlocks = [];
+		this.lastAssistantText = "";
 		this.queued = 0;
 		this.renderInitialState();
 		old.dispose();
@@ -887,48 +1095,41 @@ export class IoApp {
 				await this.switchToHarness(replacement);
 				return;
 			}
-			const items = sessions.slice(0, 20).map((session, index) => ({
-				value: session.id,
+			const items = sessions.slice(0, 40).map((session) => ({
+				id: session.id,
 				label: `${session.id.slice(0, 12)} · ${session.modified.toISOString().slice(0, 10)}`,
-				description: `${session.messageCount} msgs · ${oneLine(session.firstMessage || session.name || "(no messages)", 40)}`,
+				description: `${session.messageCount} msgs · ${oneLine(session.firstMessage || session.name || "(no messages)", 48)}`,
 			}));
-			const list = new SelectList(items, Math.min(14, items.length), selectListTheme);
-			const box = new Container();
-			box.addChild(new DynamicBorder());
-			box.addChild(new Text(style.bold("Select a session"), 0, 0));
-			box.addChild(new Spacer(1));
-			box.addChild(list);
-			box.addChild(new Spacer(1));
-			box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
-			box.addChild(new Spacer(1));
-			box.addChild(new DynamicBorder());
-			list.onSelect = async (item) => {
-				this.closeOverlay();
-				const selected = sessions.find((session) => session.id === item.value);
-				if (!selected) return;
-				const replacement = await replaceHarnessSession(this.options.harness, {
-					cwd: this.options.cwd,
-					paths: this.options.paths,
-					modelRuntime: this.options.runtime,
-					confirmCommand: this.getConfirmCommand(),
-					model: this.session.model ?? undefined,
-					thinkingLevel: this.session.thinkingLevel ?? undefined,
-					sessionId: selected.id,
-				});
-				await this.switchToHarness(replacement);
-			};
-			list.onCancel = () => {
-				this.status = undefined;
-				this.closeOverlay();
-				this.updateFooterAndTitle();
-			};
-			this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+			const picker = new SessionPicker(items, {
+				maxVisible: Math.min(12, items.length),
+				onSelect: async (item) => {
+					this.closeOverlay();
+					const selected = sessions.find((session) => session.id === item.id);
+					if (!selected) return;
+					const replacement = await replaceHarnessSession(this.options.harness, {
+						cwd: this.options.cwd,
+						paths: this.options.paths,
+						modelRuntime: this.options.runtime,
+						confirmCommand: this.getConfirmCommand(),
+						model: this.session.model ?? undefined,
+						thinkingLevel: this.session.thinkingLevel ?? undefined,
+						sessionId: selected.id,
+					});
+					await this.switchToHarness(replacement);
+				},
+				onCancel: () => {
+					this.status = undefined;
+					this.closeOverlay();
+					this.updateFooterAndTitle();
+				},
+			});
+			this.activeOverlay = this.tui.showOverlay(new PaddedBox(picker), {
 				anchor: "center",
 				width: this.tui.terminal.columns,
 				maxHeight: "70%",
 				margin: 0,
 			});
-			this.tui.setFocus(list);
+			this.tui.setFocus(picker);
 			this.tui.requestRender();
 		} catch (error) {
 			this.addNotice(`could not load sessions: ${(error as Error).message}`, { bold: true });
@@ -1140,7 +1341,19 @@ export class IoApp {
 		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
-			const models = available.models;
+			const allModels = available.models;
+			if (allModels.length <= 1) {
+				this.addNotice("Only one authenticated model available.", { dim: true });
+				return;
+			}
+			const scoped = this.config.scopedModels ?? [];
+			let models = scoped.length > 0
+				? allModels.filter((model) => scoped.includes(modelReference(model)))
+				: allModels;
+			if (models.length === 0 && scoped.length > 0) {
+				this.addNotice("scoped models unavailable; cycling all", { dim: true });
+				models = allModels;
+			}
 			if (models.length <= 1) {
 				this.addNotice("Only one authenticated model available.", { dim: true });
 				return;
@@ -1202,6 +1415,73 @@ export class IoApp {
 		this.updateFooterAndTitle();
 	}
 
+	private async showScopePicker(): Promise<void> {
+		if (this.activeOverlay) return;
+		this.status = "loading models";
+		this.updateFooterAndTitle();
+		try {
+			const available = await loadAvailableModels(this.options.runtime);
+			const models = available.models;
+			if (models.length === 0) {
+				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
+				return;
+			}
+			const items = models.map((model) => ({
+				id: model.id,
+				provider: model.provider,
+				name: model.name,
+				contextWindow: model.contextWindow,
+			}));
+			const maxVisible = Math.max(5, Math.min(14, this.tui.terminal.rows - 8, items.length));
+			const scoped = this.config.scopedModels ?? [];
+			const picker = new ScopedModelsPicker(items, {
+				maxVisible,
+				enabled: scoped.length > 0 ? scoped : items.map((item) => `${item.provider}/${item.id}`),
+				onApply: (refs) => {
+					this.status = undefined;
+					this.closeOverlay();
+					this.config = {
+						...this.config,
+						scopedModels: refs.length === items.length || refs.length === 0 ? undefined : refs,
+					};
+					try {
+						saveConfig(this.options.paths, this.config);
+					} catch (error) {
+						this.addNotice(`warning: scope changed but preference was not saved: ${(error as Error).message}`, {
+							bold: true,
+						});
+					}
+					this.addNotice(
+						refs.length === 0 ? "scoped models cleared (Ctrl+P cycles all)" : `scoped models: ${refs.length} (Ctrl+P cycles these)`,
+						{ dim: true },
+					);
+					this.updateFooterAndTitle();
+				},
+				onCancel: () => {
+					this.status = undefined;
+					this.closeOverlay();
+					this.updateFooterAndTitle();
+				},
+			});
+
+			this.activeOverlay = this.tui.showOverlay(new PaddedBox(picker), {
+				anchor: "center",
+				width: this.tui.terminal.columns,
+				maxHeight: "80%",
+				margin: 0,
+			});
+			this.tui.setFocus(picker);
+			this.tui.requestRender();
+		} catch (error) {
+			this.addNotice(`could not load models: ${(error as Error).message}`, { bold: true });
+		} finally {
+			if (!this.activeOverlay) {
+				this.status = undefined;
+				this.updateFooterAndTitle();
+			}
+		}
+	}
+
 	private async listModels(): Promise<void> {
 		this.status = "loading models";
 		this.updateFooterAndTitle();
@@ -1236,6 +1516,231 @@ export class IoApp {
 		} finally {
 			this.status = this.busy ? "generating" : undefined;
 			this.updateFooterAndTitle();
+		}
+	}
+
+	private copyLastAssistant(): void {
+		const text = this.lastAssistantText;
+		if (text.length === 0) {
+			this.addNotice("nothing to copy yet", { dim: true });
+			return;
+		}
+		const clipboard = getNativeClipboard();
+		if (clipboard?.setText) {
+			void Promise.resolve()
+				.then(() => clipboard.setText?.(text))
+				.then(
+					() => this.addNotice(`copied ${formatTokens(text.length)} chars`, { dim: true }),
+					(error) => this.addNotice(`clipboard unavailable: ${(error as Error).message}`, { bold: true }),
+				);
+			return;
+		}
+		const sequence = `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
+		const write = (this.tui.terminal as { write?: (data: string) => void }).write;
+		if (typeof write === "function") {
+			write.call(this.tui.terminal, sequence);
+			this.addNotice(`copied ${formatTokens(text.length)} chars (OSC 52)`, { dim: true });
+			return;
+		}
+		this.addNotice("clipboard unavailable", { bold: true });
+	}
+
+	private resolveExternalEditor(): string | undefined {
+		const configured = process.env.EDITOR || process.env.VISUAL;
+		if (configured?.trim()) return configured.trim();
+		for (const candidate of ["micro", "nano", "vim"]) {
+			if (this.editorAvailable(candidate)) return candidate;
+		}
+		return undefined;
+	}
+
+	private editorAvailable(name: string): boolean {
+		try {
+			const result = spawnSync("which", [name], { stdio: "ignore" });
+			return result.status === 0;
+		} catch {
+			return false;
+		}
+	}
+
+	private async openExternalEditor(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before opening the editor.", { dim: true });
+			return;
+		}
+		if (this.activeOverlay) return;
+		const command = this.resolveExternalEditor();
+		if (!command) {
+			this.addNotice("no editor found (install micro/nano/vim or set $EDITOR)", { bold: true });
+			return;
+		}
+		const [binary, ...args] = command.split(/\s+/).filter(Boolean);
+		if (!binary) {
+			this.addNotice("no editor configured (set $EDITOR)", { bold: true });
+			return;
+		}
+		const tempPath = join(tmpdir(), `io-editor-${process.pid}-${Date.now()}.md`);
+		try {
+			writeFileSync(tempPath, this.editor.getText(), { encoding: "utf8", mode: 0o600 });
+		} catch (error) {
+			this.addNotice(`could not write editor buffer: ${(error as Error).message}`, { bold: true });
+			return;
+		}
+		if (this.spinnerTimer !== undefined) {
+			clearInterval(this.spinnerTimer);
+			this.spinnerTimer = undefined;
+			this.spinnerIndex = 0;
+		}
+		try {
+			this.tui.stop();
+		} catch {
+			// Best effort; the editor still needs a clean terminal.
+		}
+		let code: number | null = null;
+		try {
+			code = await new Promise<number | null>((resolvePromise) => {
+				const child = spawn(binary, [...args, tempPath], {
+					cwd: this.options.cwd,
+					stdio: "inherit",
+				});
+				child.once("error", () => resolvePromise(1));
+				child.once("exit", (exitCode) => resolvePromise(exitCode ?? 1));
+			});
+		} finally {
+			try {
+				this.tui.start();
+			} catch {
+				// The editor output already landed; rendering resumes below.
+			}
+			this.tui.setFocus(this.editor);
+			this.updateFooterAndTitle();
+			this.tui.requestRender();
+		}
+		try {
+			if (code !== 0) {
+				this.addNotice(`editor exited (${code}). Buffer kept as-is.`, { dim: true });
+				rmSync(tempPath, { force: true });
+				return;
+			}
+			const updated = readFileSync(tempPath, "utf8");
+			this.editor.setText(updated.replace(/\n+$/, "") || updated);
+			this.addNotice("editor buffer updated from file", { dim: true });
+			this.tui.requestRender();
+		} catch {
+			this.addNotice("editor buffer kept as-is", { dim: true });
+		} finally {
+			rmSync(tempPath, { force: true });
+		}
+	}
+
+	private reloadResources(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before reloading.", { dim: true });
+			return Promise.resolve();
+		}
+		this.status = "reloading";
+		this.updateFooterAndTitle();
+		return this.reloadResourcesInner();
+	}
+
+	private async reloadResourcesInner(): Promise<void> {
+		try {
+			const reloaded = loadConfig(this.options.paths);
+			for (const warning of reloaded.warnings) {
+				this.addNotice(`warning: ${warning}`, { dim: true });
+			}
+			this.config = reloaded.config;
+			await this.session.reload();
+			this.updateAgentAutocomplete();
+			const refreshed = await refreshCatalogs(this.options.runtime, undefined, { force: true });
+			if (refreshed.errors.size > 0) {
+				const details = [...refreshed.errors.entries()]
+					.map(([providerId, error]) => `${providerName(providerId)}: ${error.message}`)
+					.join("; ");
+				this.addNotice(`model catalog refresh incomplete (${details}); using cached catalogs.`, {
+					bold: true,
+				});
+			}
+			this.addNotice("reloaded — config re-read, catalogs refreshed, session resources rebuilt", {
+				dim: true,
+			});
+		} catch (error) {
+			this.addNotice(`could not reload: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = this.busy ? "generating" : undefined;
+			this.updateFooterAndTitle();
+		}
+	}
+
+	private async checkForUpdate(): Promise<void> {
+		this.status = "checking for updates";
+		this.updateFooterAndTitle();
+		try {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 10_000);
+			let latest;
+			try {
+				latest = await fetchLatestRelease(undefined, {
+					signal: controller.signal,
+					userAgent: `io/${VERSION}`,
+				});
+			} finally {
+				clearTimeout(timeout);
+			}
+			if (!latest) {
+				this.addNotice("could not check for updates (offline?)", { bold: true });
+				return;
+			}
+			const changelog = latest.htmlUrl
+				? ` Changelog: ${latest.htmlUrl}`
+				: ` Changelog: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${latest.tag}`;
+			if (compareVersions(latest.version, VERSION) > 0) {
+				this.addNotice(
+					`io ${latest.version} is available (you're running ${VERSION}). Run \`brew upgrade io\` to update.${changelog}`,
+					{ bold: true },
+				);
+			} else {
+				this.addNotice(`io ${VERSION} is up to date.`, { dim: true });
+			}
+		} catch (error) {
+			this.addNotice(`could not check for updates: ${(error as Error).message}`, { bold: true });
+		} finally {
+			this.status = this.busy ? "generating" : undefined;
+			this.updateFooterAndTitle();
+		}
+	}
+
+	private writeDebugLog(): void {
+		try {
+			const columns = this.tui.terminal.columns;
+			const rendered: string[] = [];
+			for (const child of this.transcript.children) {
+				rendered.push(stripTerminalSequences(child.render(columns).join("\n")));
+			}
+			rendered.push("---");
+			rendered.push(stripTerminalSequences(this.footer.render(columns).join("\n")));
+			const messages = this.session.messages.slice(-20).map((message) => {
+				const text = messageText(message as { content?: unknown }).replace(/\s+/g, " ").trim();
+				return `${message.role}: ${text.slice(0, 200) || "(empty)"}`;
+			});
+			const lines = [
+				`io debug — ${new Date().toISOString()}`,
+				`cwd: ${this.options.cwd}`,
+				`model: ${this.session.model ? modelReference(this.session.model as Model<any>) : "—"}`,
+				`busy: ${this.busy} streaming: ${this.session.isStreaming}`,
+				"",
+				"--- rendered transcript ---",
+				...rendered,
+				"",
+				`--- last ${messages.length} messages ---`,
+				...messages,
+			];
+			ensureIoDirectories(this.options.paths);
+			const logPath = join(this.options.paths.dataDir, "io-debug.log");
+			writeFileSync(logPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+			this.addNotice(`debug log: ${logPath}`, { dim: true });
+		} catch (error) {
+			this.addNotice(`could not write debug log: ${(error as Error).message}`, { bold: true });
 		}
 	}
 

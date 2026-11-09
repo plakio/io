@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -7,6 +7,22 @@ export interface GitDiffResult {
 	ok: boolean;
 	text: string;
 	truncated?: boolean;
+}
+
+/** Current branch in `cwd`, or undefined when not a git work tree or detached. Fast enough for status bars. */
+export function getGitBranch(cwd: string): string | undefined {
+	try {
+		const result = spawnSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], {
+			encoding: "utf8",
+			timeout: 2_000,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		if (result.status !== 0) return undefined;
+		const branch = result.stdout.trim();
+		return branch && branch !== "HEAD" ? branch : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 const MAX_LINES = 500;

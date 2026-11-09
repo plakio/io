@@ -12,6 +12,8 @@ export interface IoConfig {
 	thinkingLevel?: ThinkingLevel;
 	primaryAgent?: string;
 	agents?: Record<string, { model?: string }>;
+	/** `provider/id` refs that Ctrl+P cycles through. Empty/undefined means all. */
+	scopedModels?: string[];
 }
 
 export interface IoPaths {
@@ -89,6 +91,11 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		config.primaryAgent = input.primaryAgent;
 	} else if (input.primaryAgent !== undefined) {
 		warnings.push("ignoring invalid config value: primaryAgent");
+	}
+	if (Array.isArray(input.scopedModels) && input.scopedModels.every((ref) => typeof ref === "string" && ref.length > 0)) {
+		config.scopedModels = input.scopedModels as string[];
+	} else if (input.scopedModels !== undefined) {
+		warnings.push("ignoring invalid config value: scopedModels");
 	}
 	if (input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)) {
 		const agents: NonNullable<IoConfig["agents"]> = {};

@@ -168,6 +168,49 @@ test("dynamic border fills the viewport width", () => {
 	assert.match(stripTerminalSequences(lines[0] ?? ""), /^─+$/);
 });
 
+test("footer shows live activity counters when non-zero", () => {
+	const footer = new Footer();
+	footer.setState({
+		modelRef: "opencode-go/kimi-k3",
+		busy: true,
+		status: "running shell",
+		spinner: "⠋",
+		activity: { commands: 8, edits: 9, reads: 8, thoughts: 5, subagents: 1 },
+		totals: { input: 12000, output: 3400, cacheRead: 9000, cacheWrite: 500, total: 15400 },
+		cost: 0.42,
+		cacheHit: 42,
+	});
+	const rendered = stripTerminalSequences(footer.render(150).join("\n"));
+	assert.match(rendered, /\+8 commands/);
+	assert.match(rendered, /\+9 edits/);
+	assert.match(rendered, /\+8 reads/);
+	assert.match(rendered, /\+5 thoughts/);
+	assert.match(rendered, /\+1 subagents/);
+	assert.match(rendered, /total 15\.4k/);
+	assert.match(rendered, /hit 42%/);
+	assert.match(rendered, /\$\d+\.42/);
+});
+
+test("footer omits zero activity counters", () => {
+	const footer = new Footer();
+	footer.setState({ modelRef: "opencode-go/kimi-k3", busy: false, activity: { commands: 0, edits: 0, reads: 0, thoughts: 0, subagents: 0 } });
+	const rendered = stripTerminalSequences(footer.render(150).join("\n"));
+	assert.doesNotMatch(rendered, /commands/);
+	assert.doesNotMatch(rendered, /edits/);
+	assert.match(rendered, /ready/);
+});
+
+test("footer shows cwd and git branch at the start (Pi style)", () => {
+	const footer = new Footer();
+	footer.setState({ cwd: "~/io", branch: "main" });
+	const rendered = stripTerminalSequences(footer.render(150).join("\n"));
+	assert.match(rendered, /~\/io \(main\)/);
+	const bare = new Footer();
+	bare.setState({ cwd: "~/io" });
+	const bareRendered = stripTerminalSequences(bare.render(150).join("\n"));
+	assert.match(bareRendered, /~\/io(?! \()/);
+});
+
 test("footer shows the spinner frame while busy and omits it when idle", () => {
 	const footer = new Footer();
 	footer.setState({ modelRef: "opencode-go/kimi-k3", busy: true, status: "generating", spinner: "⠋" });

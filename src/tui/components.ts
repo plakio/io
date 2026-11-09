@@ -366,6 +366,343 @@ export class ModelPicker extends Container {
 	}
 }
 
+export interface ScopedModelsOptions {
+	maxVisible?: number;
+	/** `provider/id` refs enabled for cycling. Empty means all. */
+	enabled: string[];
+	onApply: (refs: string[]) => void;
+	onCancel: () => void;
+}
+
+/**
+ * Scope selector in Pi's shape (ScopedModelsSelector): a bordered panel with
+ * a real `Input` filter and toggleable rows, so `Ctrl+P` only cycles the
+ * models the user keeps. `Enter` saves, `Esc` cancels.
+ */
+export class ScopedModelsPicker extends Container {
+	readonly capturesViewportInput = true;
+
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+
+	private readonly allItems: ModelPickerItem[];
+	private filteredItems: ModelPickerItem[];
+	private selectedIndex = 0;
+	private readonly maxVisible: number;
+	private readonly scope = new Set<string>();
+	private readonly onApplyCallback: (refs: string[]) => void;
+	private readonly onCancelCallback: () => void;
+	readonly searchInput: Input;
+	private readonly listContainer: Container;
+	private readonly footerText: Text;
+
+	constructor(items: ModelPickerItem[], options: ScopedModelsOptions) {
+		super();
+		this.allItems = items;
+		this.filteredItems = items;
+		this.maxVisible = Math.max(1, options.maxVisible ?? MODEL_PICKER_MAX_VISIBLE);
+		for (const ref of options.enabled) this.scope.add(ref);
+		this.onApplyCallback = options.onApply;
+		this.onCancelCallback = options.onCancel;
+
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(style.bold("Select models to cycle (scope)"), 0, 0));
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input({
+			prompt: "> ",
+			placeholder: "Filter models…",
+			placeholderStyle: style.dim,
+		});
+		this.searchInput.onSubmit = () => {
+			this.onApplyCallback([...this.scope]);
+		};
+		this.searchInput.onEscape = () => this.onCancelCallback();
+		this.addChild(this.searchInput);
+		this.addChild(new Spacer(1));
+
+		this.listContainer = new Container();
+		this.addChild(this.listContainer);
+		this.addChild(new Spacer(1));
+		this.footerText = new Text("", 0, 0);
+		this.addChild(this.footerText);
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder());
+
+		this.updateList();
+	}
+
+	getSelectedItem(): ModelPickerItem | undefined {
+		return this.filteredItems[this.selectedIndex];
+	}
+
+	getScope(): string[] {
+		return [...this.scope];
+	}
+
+	private filterModels(query: string): void {
+		this.filteredItems = query.trim().length > 0
+			? fuzzyFilter(this.allItems, query, (item) => modelSearchText(item))
+			: this.allItems;
+		this.selectedIndex = query
+			? 0
+			: Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.updateList();
+	}
+
+	private updateList(): void {
+		this.listContainer.clear();
+		if (this.filteredItems.length === 0) {
+			this.listContainer.addChild(new TruncatedText(style.dim("  No matching models"), 1, 0));
+		} else {
+			const startIndex = Math.max(
+				0,
+				Math.min(
+					this.selectedIndex - Math.floor(this.maxVisible / 2),
+					this.filteredItems.length - this.maxVisible,
+				),
+			);
+			const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+			for (let index = startIndex; index < endIndex; index++) {
+				const item = this.filteredItems[index];
+				if (!item) continue;
+				const isSelected = index === this.selectedIndex;
+				const ref = `${item.provider}/${item.id}`;
+				const inScope = this.scope.has(ref);
+				const cursor = isSelected ? style.bold("→ ") : "  ";
+				const marker = inScope ? style.bold("✓ ") : "· ";
+				const idText = isSelected ? style.bold(item.id) : item.id;
+				const name = distinctModelName(item);
+				const nameText = name ? style.dim(` (${name})`) : "";
+				const providerBadge = style.dim(` [${item.provider}]`);
+				this.listContainer.addChild(
+					new TruncatedText(`${cursor}${marker}${idText}${nameText} ${providerBadge}`, 1, 0),
+				);
+			}
+			if (startIndex > 0 || endIndex < this.filteredItems.length) {
+				this.listContainer.addChild(
+					new TruncatedText(
+						style.dim(`  (${this.selectedIndex + 1}/${this.filteredItems.length})`),
+						1,
+						0,
+					),
+				);
+			}
+		}
+		const count = this.scope.size;
+		this.footerText.setText(
+			style.dim(
+				`↑↓ move · space toggle · enter save (${count}/${this.allItems.length} in scope) · esc cancel`,
+			),
+		);
+	}
+
+	handleInput(keyData: string): void {
+		const keybindings = getKeybindings();
+		const pageIndex = getSelectPageIndex(
+			keybindings,
+			keyData,
+			this.selectedIndex,
+			this.filteredItems.length,
+			this.maxVisible,
+		);
+		if (keybindings.matches(keyData, "tui.select.up")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+			this.updateList();
+		} else if (keybindings.matches(keyData, "tui.select.down")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+		} else if (pageIndex !== undefined) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = pageIndex;
+			this.updateList();
+		} else if (matchesKey(keyData, Key.space)) {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) {
+				const ref = `${selected.provider}/${selected.id}`;
+				if (this.scope.has(ref)) this.scope.delete(ref);
+				else this.scope.add(ref);
+				this.updateList();
+			}
+		} else if (keybindings.matches(keyData, "tui.select.confirm")) {
+			this.onApplyCallback([...this.scope]);
+		} else if (keybindings.matches(keyData, "tui.select.cancel")) {
+			this.onCancelCallback();
+		} else {
+			this.searchInput.handleInput(keyData);
+			this.filterModels(this.searchInput.getValue());
+		}
+	}
+}
+
+export interface SessionPickerItem {
+	id: string;
+	label: string;
+	description: string;
+}
+
+export interface SessionPickerOptions {
+	maxVisible?: number;
+	onSelect: (item: SessionPickerItem) => void;
+	onCancel: () => void;
+}
+
+/**
+ * Session selector with fuzzy search in Pi's shape (SessionSelector: header,
+ * search input, scrollable list, footer). Type to filter by id, date, or
+ * first message; `Enter` opens, `Esc` cancels.
+ */
+export class SessionPicker extends Container {
+	readonly capturesViewportInput = true;
+
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+
+	private readonly allItems: SessionPickerItem[];
+	private filteredItems: SessionPickerItem[];
+	private selectedIndex = 0;
+	private readonly maxVisible: number;
+	private readonly onSelectCallback: (item: SessionPickerItem) => void;
+	private readonly onCancelCallback: () => void;
+	readonly searchInput: Input;
+	private readonly listContainer: Container;
+
+	constructor(items: SessionPickerItem[], options: SessionPickerOptions) {
+		super();
+		this.allItems = items;
+		this.filteredItems = items;
+		this.maxVisible = Math.max(1, options.maxVisible ?? 12);
+		this.onSelectCallback = options.onSelect;
+		this.onCancelCallback = options.onCancel;
+
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(style.bold("Select a session"), 0, 0));
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input({
+			prompt: "> ",
+			placeholder: "Filter sessions…",
+			placeholderStyle: style.dim,
+		});
+		this.searchInput.onSubmit = () => {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+		};
+		this.searchInput.onEscape = () => this.onCancelCallback();
+		this.addChild(this.searchInput);
+		this.addChild(new Spacer(1));
+
+		this.listContainer = new Container();
+		this.addChild(this.listContainer);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(style.dim("type to filter · ↑↓ move · enter open · esc cancel"), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder());
+
+		this.updateList();
+	}
+
+	getSelectedItem(): SessionPickerItem | undefined {
+		return this.filteredItems[this.selectedIndex];
+	}
+
+	private filterItems(query: string): void {
+		this.filteredItems = query.trim().length > 0
+			? fuzzyFilter(this.allItems, query, (item) => `${item.label} ${item.description}`)
+			: this.allItems;
+		this.selectedIndex = query
+			? 0
+			: Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.updateList();
+	}
+
+	private updateList(): void {
+		this.listContainer.clear();
+		if (this.filteredItems.length === 0) {
+			this.listContainer.addChild(new TruncatedText(style.dim("  No matching sessions"), 1, 0));
+			return;
+		}
+		const startIndex = Math.max(
+			0,
+			Math.min(
+				this.selectedIndex - Math.floor(this.maxVisible / 2),
+				this.filteredItems.length - this.maxVisible,
+			),
+		);
+		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		for (let index = startIndex; index < endIndex; index++) {
+			const item = this.filteredItems[index];
+			if (!item) continue;
+			const isSelected = index === this.selectedIndex;
+			const cursor = isSelected ? style.bold("→ ") : "  ";
+			const label = isSelected ? style.bold(item.label) : item.label;
+			const desc = item.description ? style.dim(` · ${item.description}`) : "";
+			this.listContainer.addChild(new TruncatedText(`${cursor}${label}${desc}`, 1, 0));
+		}
+		if (startIndex > 0 || endIndex < this.filteredItems.length) {
+			this.listContainer.addChild(
+				new TruncatedText(
+					style.dim(`  (${this.selectedIndex + 1}/${this.filteredItems.length})`),
+					1,
+					0,
+				),
+			);
+		}
+	}
+
+	handleInput(keyData: string): void {
+		const keybindings = getKeybindings();
+		const pageIndex = getSelectPageIndex(
+			keybindings,
+			keyData,
+			this.selectedIndex,
+			this.filteredItems.length,
+			this.maxVisible,
+		);
+		if (keybindings.matches(keyData, "tui.select.up")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+			this.updateList();
+		} else if (keybindings.matches(keyData, "tui.select.down")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+		} else if (pageIndex !== undefined) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = pageIndex;
+			this.updateList();
+		} else if (keybindings.matches(keyData, "tui.select.confirm")) {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+		} else if (keybindings.matches(keyData, "tui.select.cancel")) {
+			this.onCancelCallback();
+		} else {
+			this.searchInput.handleInput(keyData);
+			this.filterItems(this.searchInput.getValue());
+		}
+	}
+}
+
 /**
  * Horizontal/vertical padding for overlay content. A full-width overlay clears
  * the base transcript behind it, avoiding stray text in the margins.
@@ -392,7 +729,10 @@ export class PaddedBox implements Component {
 
 export class AssistantBlock implements Component {
 	private readonly markdown: Markdown;
+	private readonly thinkingMarkdown: Markdown;
 	private text = "";
+	private thinking = "";
+	private thinkingVisible = false;
 	private note: string | undefined;
 	private noteView: Text | undefined;
 	private timer: NodeJS.Timeout | undefined;
@@ -402,6 +742,10 @@ export class AssistantBlock implements Component {
 	constructor(requestRender: () => void) {
 		this.requestRender = requestRender;
 		this.markdown = new Markdown("", 0, 0, markdownTheme);
+		this.thinkingMarkdown = new Markdown("", 0, 0, markdownTheme, {
+			color: style.dim,
+			italic: true,
+		});
 	}
 
 	setMessage(message: AssistantMessage, streaming: boolean): void {
@@ -432,6 +776,18 @@ export class AssistantBlock implements Component {
 			this.markdown.setText(text);
 		}
 
+		const thinking = sanitizeOutput(
+			message.content
+				.filter((block) => block.type === "thinking")
+				.map((block) => (block.type === "thinking" ? block.thinking : ""))
+				.join("\n\n")
+				.trim(),
+		);
+		if (thinking !== this.thinking) {
+			this.thinking = thinking;
+			this.thinkingMarkdown.setText(thinking);
+		}
+
 		let note: string | undefined;
 		if (message.stopReason === "error") {
 			note = style.bold("error: ") + sanitizeOutput(message.errorMessage || "unknown provider error");
@@ -455,13 +811,38 @@ export class AssistantBlock implements Component {
 		return this.text;
 	}
 
+	getThinking(): string {
+		return this.thinking;
+	}
+
+	getHasThinking(): boolean {
+		return this.thinking.trim().length > 0;
+	}
+
+	setThinkingVisible(visible: boolean): void {
+		if (this.thinkingVisible === visible) return;
+		this.thinkingVisible = visible;
+		this.requestRender();
+	}
+
 	invalidate(): void {
 		this.markdown.invalidate();
+		this.thinkingMarkdown.invalidate();
 		this.noteView?.invalidate();
 	}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		if (this.getHasThinking()) {
+			if (this.thinkingVisible) {
+				lines.push(style.dim("thinking"));
+				lines.push(...this.thinkingMarkdown.render(width));
+				if (this.text.trim().length > 0) lines.push("");
+			} else {
+				lines.push(style.dim(`thinking… (ctrl+t) · ${formatTokens(this.thinking.length)} chars`));
+				if (this.text.trim().length > 0) lines.push("");
+			}
+		}
 		if (this.text.trim().length > 0) {
 			lines.push(...this.markdown.render(width));
 		}
@@ -597,6 +978,8 @@ export class NoticeBlock extends Text {
 }
 
 export interface FooterState {
+	cwd?: string;
+	branch?: string;
 	modelRef?: string;
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	speed?: string;
@@ -607,6 +990,12 @@ export interface FooterState {
 	/** Current braille frame while busy (Pi Loader frame set). */
 	spinner?: string;
 	queued?: number;
+	/** Accumulated usage across the whole session (Pi footer style). */
+	totals?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	cost?: number;
+	cacheHit?: number;
+	/** Live activity counters (opencode-style: commands, edits, reads, thoughts). */
+	activity?: { commands: number; edits: number; reads: number; thoughts: number; subagents: number };
 }
 
 export class Footer implements Component {
@@ -620,6 +1009,7 @@ export class Footer implements Component {
 
 	render(width: number): string[] {
 		const header: string[] = [];
+		if (this.state.cwd) header.push(style.bold(this.state.branch ? `${this.state.cwd} (${this.state.branch})` : this.state.cwd));
 		if (this.state.modelRef) header.push(style.bold(this.state.modelRef));
 		let status = this.state.busy ? (this.state.status ?? "generating") : "ready";
 		if ((this.state.queued ?? 0) > 0) status += ` · queued ${this.state.queued}`;
@@ -628,11 +1018,28 @@ export class Footer implements Component {
 		if (this.state.sessionId) header.push(style.dim(`session ${this.state.sessionId.slice(0, 8)}`));
 
 		const metrics: string[] = [];
+		if (this.state.activity) {
+			const activity = this.state.activity;
+			const parts: string[] = [];
+			if (activity.commands > 0) parts.push(`+${activity.commands} commands`);
+			if (activity.edits > 0) parts.push(`+${activity.edits} edits`);
+			if (activity.reads > 0) parts.push(`+${activity.reads} reads`);
+			if (activity.thoughts > 0) parts.push(`+${activity.thoughts} thoughts`);
+			if (activity.subagents > 0) parts.push(`+${activity.subagents} subagents`);
+			if (parts.length > 0) metrics.push(style.dim(parts.join(", ")));
+		}
 		if (this.state.usage) {
 			const usage: string[] = [];
 			if (this.state.usage.input > 0) usage.push(`in ${formatTokens(this.state.usage.input)}`);
 			if (this.state.usage.output > 0) usage.push(`out ${formatTokens(this.state.usage.output)}`);
 			if (usage.length > 0) metrics.push(style.dim(usage.join(" ")));
+		}
+		if (this.state.totals) {
+			const totals: string[] = [];
+			if (this.state.totals.total > 0) totals.push(`total ${formatTokens(this.state.totals.total)}`);
+			if (this.state.cacheHit !== undefined) totals.push(style.dim(`hit ${this.state.cacheHit.toFixed(0)}%`));
+			if (this.state.cost !== undefined && this.state.cost > 0) totals.push(style.dim(`$${this.state.cost.toFixed(2)}`));
+			if (totals.length > 0) metrics.push(totals.join(style.dim(" ")));
 		}
 		if (this.state.speed) metrics.push(style.dim(this.state.speed));
 		if (this.state.context) metrics.push(style.dim(this.state.context));

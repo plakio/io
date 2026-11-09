@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	formatContext,
+	formatCwdForFooter,
 	formatDuration,
 	formatSpeed,
 	formatTokens,
@@ -42,4 +43,13 @@ test("oneLine trims and truncates", () => {
 	assert.equal(oneLine("  hello\n world  ", 30), "hello world");
 	assert.equal(oneLine("abcdefghij", 6), "abcde…");
 	assert.equal(shortSessionId("0123456789abcdef"), "01234567");
+});
+
+test("formatCwdForFooter shortens home-relative paths like Pi", () => {
+	assert.equal(formatCwdForFooter("/home/oscar/io", "/home/oscar"), "~/io");
+	assert.equal(formatCwdForFooter("/home/oscar/io/sub", "/home/oscar"), "~/io/sub");
+	assert.equal(formatCwdForFooter("/home/oscar", "/home/oscar"), "~");
+	assert.equal(formatCwdForFooter("/tmp/x", "/home/oscar"), "/tmp/x");
+	assert.equal(formatCwdForFooter("/home/oscar/io", undefined), "/home/oscar/io");
+	assert.equal(formatCwdForFooter("/home/oscar-other/io", "/home/oscar"), "/home/oscar-other/io");
 });
