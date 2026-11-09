@@ -1,8 +1,15 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
+	Box,
 	Container,
+	Input,
 	Markdown,
+	Spacer,
 	Text,
+	TruncatedText,
+	fuzzyFilter,
+	getKeybindings,
+	getSelectPageIndex,
 	matchesKey,
 	stripTerminalSequences,
 	truncateToWidth,
@@ -89,33 +96,276 @@ export class UserBlock extends PrefixedText {
 }
 
 /**
+ * Horizontal rule that fills the viewport width, in the style of Pi's
+ * DynamicBorder. Used as the top/bottom shell of pickers so overlays read as
+ * bordered panels instead of loose text in padded space.
+ */
+export class DynamicBorder implements Component {
+	private readonly colorFn: (text: string) => string;
+
+	constructor(colorFn: (text: string) => string = style.dim) {
+		this.colorFn = colorFn;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return [this.colorFn("─".repeat(Math.max(1, width)))];
+	}
+}
+
+/**
+ * Search text for the model picker, in Pi's ModelSelector style
+ * (`provider provider/id id name`). The provider comes first so that an exact
+ * provider-prefixed query ranks ahead of proxy IDs that merely contain the
+ * characters. Matched with `fuzzyFilter`, so typing `kimi` finds
+ * `opencode-go/kimi-k3` without having to type the full reference.
+ */
+export function modelSearchText(item: { id: string; provider: string; name?: string }): string {
+	const name = item.name ? ` ${item.name}` : "";
+	return `${item.provider} ${item.provider}/${item.id} ${item.id}${name}`;
+}
+
+const splitModelLabel = (value: string): string[] =>
+	value
+		.toLowerCase()
+		.split(/[^\p{L}\p{N}]+/u)
+		.filter(Boolean);
+
+/**
+ * Return the model name only when it adds words the id does not already
+ * contain (Pi's getDistinctModelName). `Kimi K3` for `kimi-k3` has no new
+ * words and renders as nothing; a renamed override keeps its full name.
+ */
+export function distinctModelName(item: { id: string; name?: string }): string | undefined {
+	const name = item.name?.trim();
+	if (!name) return undefined;
+	const idWords = splitModelLabel(item.id);
+	const idTokens = new Set(idWords);
+	const compactId = idWords.join("");
+	const isCovered = (word: string): boolean =>
+		idTokens.has(word) || (word.length > 1 && compactId.includes(word));
+	return splitModelLabel(name).every(isCovered) ? undefined : name;
+}
+
+export interface ModelPickerItem {
+	id: string;
+	provider: string;
+	name?: string;
+	contextWindow?: number;
+}
+
+export interface ModelPickerOptions {
+	maxVisible?: number;
+	/** `provider/id` of the model in use; it gets the `✓` marker. */
+	currentValue?: string;
+	onSelect: (item: ModelPickerItem) => void;
+	onCancel: () => void;
+}
+
+const MODEL_PICKER_MAX_VISIBLE = 10;
+
+/**
+ * Model selector in Pi's shape: a bordered panel with a real `Input` for the
+ * filter and a fuzzy-filtered list (`→` cursor, `✓` current marker,
+ * `[provider]` badge, `(i/n)` scroll, selected `Model Name` footer).
+ *
+ * This exists because Pi's `SelectList.setFilter` matches with `startsWith` on
+ * `value`, which can never find `opencode-go/kimi-k3` from `kimi`. The picker
+ * owns filtering through `fuzzyFilter` instead, like Pi's own
+ * ModelSelectorComponent, and never touches `SelectList` internals.
+ */
+export class ModelPicker extends Container {
+	readonly capturesViewportInput = true;
+
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.searchInput.focused = value;
+	}
+
+	private readonly allItems: ModelPickerItem[];
+	private filteredItems: ModelPickerItem[];
+	private selectedIndex = 0;
+	private readonly maxVisible: number;
+	private readonly currentValue: string | undefined;
+	private readonly onSelectCallback: (item: ModelPickerItem) => void;
+	private readonly onCancelCallback: () => void;
+	readonly searchInput: Input;
+	private readonly listContainer: Container;
+
+	constructor(items: ModelPickerItem[], options: ModelPickerOptions) {
+		super();
+		this.allItems = items;
+		this.filteredItems = items;
+		this.maxVisible = Math.max(1, options.maxVisible ?? MODEL_PICKER_MAX_VISIBLE);
+		this.currentValue = options.currentValue;
+		this.onSelectCallback = options.onSelect;
+		this.onCancelCallback = options.onCancel;
+
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(style.bold("Select a model"), 0, 0));
+		this.addChild(new Spacer(1));
+
+		this.searchInput = new Input({
+			prompt: "> ",
+			placeholder: "Filter models…",
+			placeholderStyle: style.dim,
+		});
+		this.searchInput.onSubmit = () => {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+		};
+		this.searchInput.onEscape = () => this.onCancelCallback();
+		this.addChild(this.searchInput);
+		this.addChild(new Spacer(1));
+
+		this.listContainer = new Container();
+		this.addChild(this.listContainer);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder());
+
+		if (this.currentValue) {
+			const index = this.filteredItems.findIndex(
+				(item) => `${item.provider}/${item.id}` === this.currentValue,
+			);
+			if (index >= 0) this.selectedIndex = index;
+		}
+		this.updateList();
+	}
+
+	getSelectedItem(): ModelPickerItem | undefined {
+		return this.filteredItems[this.selectedIndex];
+	}
+
+	private filterModels(query: string): void {
+		this.filteredItems = query.trim().length > 0
+			? fuzzyFilter(this.allItems, query, (item) => modelSearchText(item))
+			: this.allItems;
+		this.selectedIndex = query
+			? 0
+			: Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.updateList();
+	}
+
+	private updateList(): void {
+		this.listContainer.clear();
+		if (this.filteredItems.length === 0) {
+			this.listContainer.addChild(new TruncatedText(style.dim("  No matching models"), 1, 0));
+			return;
+		}
+		const startIndex = Math.max(
+			0,
+			Math.min(
+				this.selectedIndex - Math.floor(this.maxVisible / 2),
+				this.filteredItems.length - this.maxVisible,
+			),
+		);
+		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		for (let index = startIndex; index < endIndex; index++) {
+			const item = this.filteredItems[index];
+			if (!item) continue;
+			const isSelected = index === this.selectedIndex;
+			const isCurrent =
+				this.currentValue !== undefined &&
+				`${item.provider}/${item.id}` === this.currentValue;
+			const cursor = isSelected ? style.bold("→ ") : "  ";
+			const currentMarker = isCurrent ? style.bold("✓ ") : "  ";
+			const idText = isSelected ? style.bold(item.id) : item.id;
+			const name = distinctModelName(item);
+			const nameText = name ? style.dim(` (${name})`) : "";
+			const providerBadge = style.dim(` [${item.provider}]`);
+			this.listContainer.addChild(
+				new TruncatedText(`${cursor}${currentMarker}${idText}${nameText} ${providerBadge}`, 1, 0),
+			);
+		}
+		if (startIndex > 0 || endIndex < this.filteredItems.length) {
+			this.listContainer.addChild(
+				new TruncatedText(
+					style.dim(`  (${this.selectedIndex + 1}/${this.filteredItems.length})`),
+					1,
+					0,
+				),
+			);
+		}
+		const selected = this.filteredItems[this.selectedIndex];
+		if (selected) {
+			this.listContainer.addChild(new Spacer(1));
+			const context = selected.contextWindow
+				? ` · ${formatTokens(selected.contextWindow)} ctx`
+				: "";
+			this.listContainer.addChild(
+				new TruncatedText(
+					style.dim(`  Model Name: ${selected.name ?? selected.id}${context}`),
+					1,
+					0,
+				),
+			);
+		}
+	}
+
+	handleInput(keyData: string): void {
+		const keybindings = getKeybindings();
+		const pageIndex = getSelectPageIndex(
+			keybindings,
+			keyData,
+			this.selectedIndex,
+			this.filteredItems.length,
+			this.maxVisible,
+		);
+		if (keybindings.matches(keyData, "tui.select.up")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
+			this.updateList();
+		} else if (keybindings.matches(keyData, "tui.select.down")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex =
+				this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+		} else if (pageIndex !== undefined) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = pageIndex;
+			this.updateList();
+		} else if (keybindings.matches(keyData, "tui.select.confirm")) {
+			const selected = this.filteredItems[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected);
+		} else if (keybindings.matches(keyData, "tui.select.cancel")) {
+			this.onCancelCallback();
+		} else {
+			this.searchInput.handleInput(keyData);
+			this.filterModels(this.searchInput.getValue());
+		}
+	}
+}
+
+/**
  * Horizontal/vertical padding for overlay content. A full-width overlay clears
  * the base transcript behind it, avoiding stray text in the margins.
+ *
+ * Implemented with pi-tui's `Box` (same padding contract, plus a cache and
+ * mouse dispatch) instead of a hand-rolled padder.
  */
 export class PaddedBox implements Component {
-	private readonly child: Component;
-	private readonly paddingX: number;
-	private readonly paddingY: number;
+	private readonly box: Box;
 
 	constructor(child: Component, paddingX = 2, paddingY = 1) {
-		this.child = child;
-		this.paddingX = paddingX;
-		this.paddingY = paddingY;
+		this.box = new Box(paddingX, paddingY);
+		this.box.addChild(child);
 	}
 
 	invalidate(): void {
-		this.child.invalidate();
+		this.box.invalidate();
 	}
 
 	render(width: number): string[] {
-		const innerWidth = Math.max(1, width - this.paddingX * 2);
-		const lines = this.child.render(innerWidth).map((line) => `${" ".repeat(this.paddingX)}${line}`);
-		const blank = " ".repeat(width);
-		return [
-			...Array.from({ length: this.paddingY }, () => blank),
-			...lines,
-			...Array.from({ length: this.paddingY }, () => blank),
-		];
+		return this.box.render(width);
 	}
 }
 
@@ -333,6 +583,8 @@ export interface FooterState {
 	sessionId?: string;
 	busy?: boolean;
 	status?: string;
+	/** Current braille frame while busy (Pi Loader frame set). */
+	spinner?: string;
 	queued?: number;
 }
 
@@ -350,6 +602,7 @@ export class Footer implements Component {
 		if (this.state.modelRef) header.push(style.bold(this.state.modelRef));
 		let status = this.state.busy ? (this.state.status ?? "generating") : "ready";
 		if ((this.state.queued ?? 0) > 0) status += ` · queued ${this.state.queued}`;
+		if (this.state.busy && this.state.spinner) status = `${this.state.spinner} ${status}`;
 		header.push(this.state.busy ? style.bold(status) : style.dim(status));
 		if (this.state.sessionId) header.push(style.dim(`session ${this.state.sessionId.slice(0, 8)}`));
 
@@ -418,6 +671,7 @@ export class ConfirmOverlay implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		lines.push(new DynamicBorder().render(width)[0] ?? "");
 		lines.push(style.bold("Run this command?"));
 		lines.push("");
 		for (const line of this.command.replace(/\r/g, "").split("\n")) {
@@ -428,6 +682,7 @@ export class ConfirmOverlay implements Component {
 		lines.push(truncateToWidth(style.dim(`Reason: ${this.reason}`), width, "…"));
 		lines.push("");
 		lines.push(truncateToWidth(style.dim("[y] allow    [n] deny"), width, "…"));
+		lines.push(new DynamicBorder().render(width)[0] ?? "");
 		return lines;
 	}
 }

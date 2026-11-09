@@ -3,6 +3,7 @@ import {
 	CombinedAutocompleteProvider,
 	Container,
 	Key,
+	fuzzyFilter,
 	matchesKey,
 	ProcessTerminal,
 	SelectList,
@@ -10,6 +11,7 @@ import {
 	Text,
 	TuiMainScreen,
 	type OverlayHandle,
+	type ProgramStatus,
 } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -26,7 +28,18 @@ import {
 } from "../session.js";
 import { getPrimaryAgents, type AgentCatalog } from "../agents.js";
 import { VERSION } from "../version.js";
-import { AssistantBlock, ConfirmOverlay, Footer, NoticeBlock, PaddedBox, ToolBlock, UserBlock } from "./components.js";
+import {
+	AssistantBlock,
+	ConfirmOverlay,
+	DynamicBorder,
+	Footer,
+	ModelPicker,
+	NoticeBlock,
+	PaddedBox,
+	ToolBlock,
+	UserBlock,
+	modelSearchText,
+} from "./components.js";
 import { IoEditor } from "./editor.js";
 import { editorTheme, selectListTheme, style } from "./theme.js";
 
@@ -99,6 +112,14 @@ export class IoApp {
 	private toolOutputExpanded = false;
 	private lastCtrlC = 0;
 	private config: IoConfig;
+	private programDone = false;
+	private programError: string | undefined;
+	private awaitingConfirm = false;
+	private lastProgramStatusJson = "";
+	private lastProgress = false;
+	private spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+	private spinnerIndex = 0;
+	private spinnerTimer: NodeJS.Timeout | undefined;
 
 	constructor(options: IoAppOptions) {
 		this.options = options;
@@ -208,6 +229,8 @@ export class IoApp {
 		switch (event.type) {
 			case "agent_start":
 				this.busy = true;
+				this.programDone = false;
+				this.programError = undefined;
 				this.status = "generating";
 				this.lastUsage = undefined;
 				this.lastDurationMs = undefined;
@@ -219,6 +242,7 @@ export class IoApp {
 			case "agent_settled":
 				this.busy = false;
 				this.status = undefined;
+				if (!this.programError) this.programDone = true;
 				this.activeAssistant?.dispose();
 				this.activeAssistant = undefined;
 				this.updateFooterAndTitle();
@@ -247,6 +271,11 @@ export class IoApp {
 					if (assistant.usage) {
 						this.lastUsage = assistant.usage;
 						this.lastDurationMs = assistant.durationMs;
+					}
+					if (assistant.stopReason === "error") {
+						this.programError = oneLine(assistant.errorMessage || "unknown error", 120);
+					} else if (assistant.stopReason === "aborted") {
+						this.programDone = false;
 					}
 					this.updateFooterAndTitle();
 				}
@@ -285,7 +314,9 @@ export class IoApp {
 				break;
 			case "auto_retry_end":
 				if (!event.success) {
+					this.programError = oneLine(event.finalError ?? "retry failed", 120);
 					this.addNotice(`retry failed: ${event.finalError ?? "unknown error"}`, { bold: true });
+					this.updateFooterAndTitle();
 				}
 				break;
 			case "compaction_start":
@@ -298,6 +329,7 @@ export class IoApp {
 				if (event.result) {
 					this.addNotice("context compacted", { dim: true });
 				} else if (event.errorMessage) {
+					this.programError = oneLine(event.errorMessage, 120);
 					this.addNotice(`compaction failed: ${event.errorMessage}`, { bold: true });
 				}
 				this.updateFooterAndTitle();
@@ -317,6 +349,11 @@ export class IoApp {
 	}
 
 	private updateTerminalTitle(): void {
+		// OSC 0 window/tab text only. Rex does not derive its tab icon from this
+		// string: the icon comes from OSC 7501 Program Status (see
+		// updateProgramStatus), and the ⏳/✓ glyphs here are font-dependent
+		// (they can render as tofu in terminals without an emoji font). The
+		// title is kept for window titlebars and non-Rex terminals.
 		const model = this.session.model ?? this.options.model;
 		const marker = this.busy ? "⏳" : "✓";
 		const parts = ["io"];
@@ -329,14 +366,69 @@ export class IoApp {
 		this.tui.terminal.setTitle(`${marker} ${parts.join(" · ")}`);
 	}
 
+	private updateProgramStatus(): void {
+		// OSC 7501 (Rex Program Status) + OSC 9;4 terminal progress. Pi does
+		// the same via ProgramStatusReporter: blocked wins over working, and
+		// done/error latch until the next run. Writes are deduplicated so
+		// frequent footer updates do not spam the terminal; the terminal
+		// itself no-ops when the terminal never confirmed OSC 7501 support.
+		const streaming = this.busy || this.session.isStreaming;
+		let status: ProgramStatus;
+		if (this.awaitingConfirm) {
+			status = { state: "blocked", kind: "permission", app: "io", message: "confirmation needed" };
+		} else if (streaming) {
+			status = { state: "working", app: "io", message: this.status ?? "working" };
+		} else if (this.programError) {
+			status = { state: "error", app: "io", message: this.programError };
+		} else if (this.programDone) {
+			status = { state: "done", app: "io", message: "done" };
+		} else {
+			status = { state: "idle", app: "io" };
+		}
+		const key = JSON.stringify(status);
+		if (key !== this.lastProgramStatusJson) {
+			this.lastProgramStatusJson = key;
+			this.tui.terminal.setProgramStatus(status);
+		}
+		if (streaming !== this.lastProgress) {
+			this.lastProgress = streaming;
+			this.tui.terminal.setProgress(streaming);
+		}
+	}
+
+	private updateSpinnerTimer(): void {
+		const active = this.busy || this.session.isStreaming;
+		if (active && this.spinnerTimer === undefined) {
+			this.spinnerTimer = setInterval(() => {
+				if (!this.busy && !this.session.isStreaming) {
+					if (this.spinnerTimer !== undefined) clearInterval(this.spinnerTimer);
+					this.spinnerTimer = undefined;
+					this.spinnerIndex = 0;
+					this.updateFooter();
+					return;
+				}
+				this.spinnerIndex = (this.spinnerIndex + 1) % this.spinnerFrames.length;
+				this.updateFooter();
+			}, 80);
+			this.spinnerTimer.unref?.();
+		} else if (!active && this.spinnerTimer !== undefined) {
+			clearInterval(this.spinnerTimer);
+			this.spinnerTimer = undefined;
+			this.spinnerIndex = 0;
+		}
+	}
+
 	private updateFooterAndTitle(): void {
 		this.updateFooter();
 		this.updateTerminalTitle();
+		this.updateProgramStatus();
+		this.updateSpinnerTimer();
 	}
 
 	private updateFooter(): void {
 		const model = this.session.model ?? this.options.model;
 		const stats = this.session.getSessionStats();
+		const streaming = this.busy || this.session.isStreaming;
 		this.footer.setState({
 			modelRef: model ? modelReference(model as Model<any>) : undefined,
 			usage: this.lastUsage,
@@ -345,6 +437,7 @@ export class IoApp {
 			sessionId: this.session.sessionId,
 			busy: this.busy,
 			status: this.status,
+			spinner: streaming ? this.spinnerFrames[this.spinnerIndex] : undefined,
 			queued: this.queued,
 		});
 		this.tui.requestRender();
@@ -604,11 +697,14 @@ export class IoApp {
 			if (index >= 0) list.setSelectedIndex(index);
 		}
 		const box = new Container();
+		box.addChild(new DynamicBorder());
 		box.addChild(new Text(style.bold("Select thinking effort"), 0, 0));
 		box.addChild(new Spacer(1));
 		box.addChild(list);
 		box.addChild(new Spacer(1));
 		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+		box.addChild(new Spacer(1));
+		box.addChild(new DynamicBorder());
 
 		list.onSelect = (item) => {
 			this.status = undefined;
@@ -723,6 +819,9 @@ export class IoApp {
 		this.lastDurationMs = undefined;
 		this.busy = false;
 		this.status = undefined;
+		this.programDone = false;
+		this.programError = undefined;
+		this.awaitingConfirm = false;
 		this.queued = 0;
 		this.renderInitialState();
 		old.dispose();
@@ -791,11 +890,14 @@ export class IoApp {
 			}));
 			const list = new SelectList(items, Math.min(14, items.length), selectListTheme);
 			const box = new Container();
+			box.addChild(new DynamicBorder());
 			box.addChild(new Text(style.bold("Select a session"), 0, 0));
 			box.addChild(new Spacer(1));
 			box.addChild(list);
 			box.addChild(new Spacer(1));
 			box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+			box.addChild(new Spacer(1));
+			box.addChild(new DynamicBorder());
 			list.onSelect = async (item) => {
 				this.closeOverlay();
 				const selected = sessions.find((session) => session.id === item.value);
@@ -885,11 +987,14 @@ export class IoApp {
 		}));
 		const list = new SelectList(items, Math.min(14, items.length), selectListTheme);
 		const box = new Container();
+		box.addChild(new DynamicBorder());
 		box.addChild(new Text(style.bold("Select a message to fork from"), 0, 0));
 		box.addChild(new Spacer(1));
 		box.addChild(list);
 		box.addChild(new Spacer(1));
 		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
+		box.addChild(new Spacer(1));
+		box.addChild(new DynamicBorder());
 		list.onSelect = async (item) => {
 			this.closeOverlay();
 			const entry = messages.find((message) => message.entryId === item.value);
@@ -956,84 +1061,41 @@ export class IoApp {
 				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
 				return;
 			}
-			const current = this.session.model;
+			const current = this.session.model ?? this.options.model;
 			const items = models.map((model) => ({
-				value: modelReference(model),
-				label: modelReference(model),
-				description: `${model.name}${model.contextWindow ? ` · ${formatTokens(model.contextWindow)} ctx` : ""}`,
+				id: model.id,
+				provider: model.provider,
+				name: model.name,
+				contextWindow: model.contextWindow,
 			}));
 			const maxVisible = Math.max(5, Math.min(14, this.tui.terminal.rows - 8, items.length));
-			const list = new SelectList(items, maxVisible, selectListTheme, {
-				maxPrimaryColumnWidth: 44,
-			});
-			if (current) {
-				const index = items.findIndex((item) => item.value === modelReference(current));
-				if (index >= 0) list.setSelectedIndex(index);
-			}
-
-			const search = new Text("", 0, 0);
-			const box = new Container();
-			box.addChild(new Text(style.bold("Select a model"), 0, 0));
-			box.addChild(new Spacer(1));
-			box.addChild(search);
-			box.addChild(new Spacer(1));
-			box.addChild(list);
-			box.addChild(new Spacer(1));
-			box.addChild(new Text(style.dim("type to filter · ↑↓ move · enter select · esc cancel"), 0, 0));
-
-			let filter = "";
-			const applyFilter = () => {
-				list.setFilter(filter);
-				search.setText(style.dim(`filter: ${filter || "—"}`));
-				this.tui.requestRender();
-			};
-			const onInput = (data: string): boolean => {
-				if (data === "\r" || data === "\n") return false;
-				if (data === "\x7f" || data === "\b") {
-					if (filter.length > 0) {
-						filter = filter.slice(0, -1);
-						applyFilter();
-					}
-					return true;
-				}
-				if (data === "\x1b" || data === "\x03") return false;
-				if (data.length > 0 && !data.startsWith("\x1b") && data.charCodeAt(0) >= 32) {
-					filter += data;
-					applyFilter();
-					return true;
-				}
-				return false;
-			};
-			const removeListener = this.tui.addInputListener((data) => {
-				if (!this.activeOverlay) {
-					removeListener();
-					return undefined;
-				}
-				return onInput(data) ? { consume: true } : undefined;
+			const picker = new ModelPicker(items, {
+				maxVisible,
+				currentValue: current ? modelReference(current as Model<any>) : undefined,
+				onSelect: (item) => {
+					this.status = undefined;
+					this.closeOverlay();
+					const model = models.find(
+						(candidate) => modelReference(candidate) === `${item.provider}/${item.id}`,
+					);
+					if (model) void this.applyModel(model);
+					this.updateFooterAndTitle();
+				},
+				onCancel: () => {
+					this.status = undefined;
+					this.closeOverlay();
+					this.updateFooterAndTitle();
+				},
 			});
 
-			list.onSelect = (item) => {
-				this.status = undefined;
-				this.closeOverlay();
-				const model = models.find((candidate) => modelReference(candidate) === item.value);
-				if (model) void this.applyModel(model);
-				this.updateFooterAndTitle();
-			};
-			list.onCancel = () => {
-				this.status = undefined;
-				this.closeOverlay();
-				this.updateFooterAndTitle();
-			};
-
-			this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+			this.activeOverlay = this.tui.showOverlay(new PaddedBox(picker), {
 				anchor: "center",
 				width: this.tui.terminal.columns,
 				maxHeight: "80%",
 				margin: 0,
 			});
-			this.tui.setFocus(list);
+			this.tui.setFocus(picker);
 			this.tui.requestRender();
-			applyFilter();
 		} catch (error) {
 			this.addNotice(`could not load models: ${(error as Error).message}`, { bold: true });
 		} finally {
@@ -1086,10 +1148,17 @@ export class IoApp {
 		const available = await loadAvailableModels(this.options.runtime);
 		const models = available.models;
 		const parsed = parseModelReference(reference);
-		const model = models.find(
+		const exact = models.find(
 			(candidate) =>
 				candidate.id === parsed.model && (parsed.provider === undefined || candidate.provider === parsed.provider),
 		);
+		// Same fuzzy search as the picker, so `/model kimi` finds
+		// `opencode-go/kimi-k3` instead of requiring the full reference.
+		const model =
+			exact ??
+			fuzzyFilter(models, reference, (candidate) =>
+				modelSearchText({ id: candidate.id, provider: candidate.provider, name: candidate.name }),
+			)[0];
 		if (!model) {
 			this.addNotice(`model "${reference}" is not available. Run /models to list options.`, { bold: true });
 			return;
@@ -1199,8 +1268,10 @@ export class IoApp {
 			const finish = (allowed: boolean) => {
 				if (settled) return;
 				settled = true;
+				this.awaitingConfirm = false;
 				signal?.removeEventListener("abort", onAbort);
 				this.closeOverlay();
+				this.updateFooterAndTitle();
 				resolve(allowed);
 			};
 			const onAbort = () => finish(false);
@@ -1208,6 +1279,7 @@ export class IoApp {
 			const overlay = new ConfirmOverlay(command, reason, finish, () => {
 				void this.cancelGeneration();
 			});
+			this.awaitingConfirm = true;
 			this.activeOverlay = this.tui.showOverlay(new PaddedBox(overlay), {
 				anchor: "center",
 				width: this.tui.terminal.columns,
@@ -1216,6 +1288,7 @@ export class IoApp {
 			});
 			this.tui.setFocus(overlay);
 			this.tui.requestRender();
+			this.updateFooterAndTitle();
 		});
 	};
 
@@ -1226,11 +1299,25 @@ export class IoApp {
 	private exit(code: number): void {
 		if (this.exiting) return;
 		this.exiting = true;
+		if (this.spinnerTimer !== undefined) {
+			clearInterval(this.spinnerTimer);
+			this.spinnerTimer = undefined;
+		}
 		try {
 			this.unsubscribe?.();
 			this.session.dispose();
 		} catch {
 			// Terminal restoration is more important than a dispose error.
+		}
+		try {
+			this.tui.terminal.setProgress(false);
+		} catch {
+			// Ignore; the process is exiting.
+		}
+		try {
+			this.tui.terminal.setProgramStatus({ state: "clear", app: "io" });
+		} catch {
+			// Ignore; the process is exiting.
 		}
 		try {
 			this.tui.stop();

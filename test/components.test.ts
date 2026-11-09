@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { fuzzyFilter, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	AssistantBlock,
 	ConfirmOverlay,
+	DynamicBorder,
 	Footer,
+	ModelPicker,
 	ToolBlock,
+	distinctModelName,
+	modelSearchText,
 } from "../src/tui/components.js";
 
 test("tool blocks preview long output and expand on request", () => {
@@ -74,4 +78,82 @@ test("confirmation overlay accepts only explicit allow keys", () => {
 	});
 	allow.handleInput("y");
 	assert.deepEqual(decisions, [false, true]);
+});
+
+const PICKER_ITEMS = [
+	{ id: "glm-5.3", provider: "opencode-go", name: "GLM 5.3", contextWindow: 200000 },
+	{ id: "kimi-k3", provider: "opencode-go", name: "Kimi K3", contextWindow: 256000 },
+];
+
+test("model search finds kimi inside the full provider/model reference", () => {
+	assert.match(modelSearchText({ id: "kimi-k3", provider: "opencode-go", name: "Kimi K3" }), /kimi/);
+	const filtered = fuzzyFilter(PICKER_ITEMS, "kimi", (item) => modelSearchText(item));
+	assert.equal(filtered[0]?.id, "kimi-k3");
+	assert.equal(filtered.length, 1);
+	const slashed = fuzzyFilter(PICKER_ITEMS, "opencode-go/kimi", (item) => modelSearchText(item));
+	assert.equal(slashed[0]?.id, "kimi-k3");
+	// Non-defining names stay hidden in rows; distinct ones are kept.
+	assert.equal(distinctModelName({ id: "kimi-k3", name: "Kimi K3" }), undefined);
+	assert.equal(distinctModelName({ id: "kimi-k3", name: "Moonshot K3 Flagship" }), "Moonshot K3 Flagship");
+});
+
+test("model picker filters fuzzy and renders cursor, current marker, and provider", () => {
+	const picker = new ModelPicker(PICKER_ITEMS, {
+		maxVisible: 5,
+		currentValue: "opencode-go/kimi-k3",
+		onSelect: () => {},
+		onCancel: () => {},
+	});
+	for (const char of "kimi") picker.handleInput(char);
+	const rendered = stripTerminalSequences(picker.render(80).join("\n"));
+	assert.match(rendered, /kimi-k3/);
+	assert.match(rendered, /✓/);
+	assert.match(rendered, /\[opencode-go\]/);
+	assert.doesNotMatch(rendered, /glm-5\.3/);
+	assert.equal(picker.getSelectedItem()?.id, "kimi-k3");
+});
+
+test("model picker selects the filtered model with Enter", () => {
+	const selected: string[] = [];
+	const picker = new ModelPicker(PICKER_ITEMS, {
+		maxVisible: 5,
+		onSelect: (item) => selected.push(`${item.provider}/${item.id}`),
+		onCancel: () => {},
+	});
+	for (const char of "kimi") picker.handleInput(char);
+	picker.handleInput("\r");
+	assert.deepEqual(selected, ["opencode-go/kimi-k3"]);
+});
+
+test("model picker moves with Down and shows the no-match state", () => {
+	const picker = new ModelPicker(PICKER_ITEMS, {
+		maxVisible: 5,
+		onSelect: () => {},
+		onCancel: () => {},
+	});
+	assert.equal(picker.getSelectedItem()?.id, "glm-5.3");
+	picker.handleInput("\x1b[B");
+	assert.equal(picker.getSelectedItem()?.id, "kimi-k3");
+	for (const char of "zzz-no-match") picker.handleInput(char);
+	const rendered = stripTerminalSequences(picker.render(80).join("\n"));
+	assert.match(rendered, /No matching models/);
+});
+
+test("dynamic border fills the viewport width", () => {
+	const lines = new DynamicBorder().render(20);
+	assert.equal(lines.length, 1);
+	assert.equal(stripTerminalSequences(lines[0] ?? "").length, 20);
+	assert.match(stripTerminalSequences(lines[0] ?? ""), /^─+$/);
+});
+
+test("footer shows the spinner frame while busy and omits it when idle", () => {
+	const footer = new Footer();
+	footer.setState({ modelRef: "opencode-go/kimi-k3", busy: true, status: "generating", spinner: "⠋" });
+	const busyLine = footer.render(120)[0] ?? "";
+	assert.match(busyLine, /⠋/);
+	assert.match(busyLine, /generating/);
+	footer.setState({ modelRef: "opencode-go/kimi-k3", busy: false });
+	const idleLine = footer.render(120)[0] ?? "";
+	assert.match(idleLine, /ready/);
+	assert.doesNotMatch(idleLine, /⠋/);
 });
