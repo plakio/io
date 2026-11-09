@@ -20,7 +20,7 @@ import { saveConfig } from "../config.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
 import { modelReference, parseModelReference } from "../providers.js";
-import { loadAvailableModels } from "../runtime.js";
+import { refreshCatalogs, loadAvailableModels } from "../runtime.js";
 import {
 	replaceHarnessSession,
 	type ConfirmCommand,
@@ -152,6 +152,10 @@ export class IoApp {
 		this.subscribe();
 		this.tui.start();
 		this.updateFooterAndTitle();
+		// Merge fresh provider catalogs in the background (like Pi), so new
+		// models appear in /model without a manual refresh. Never blocks
+		// the first paint; the picker just sees the snapshot at open time.
+		void refreshCatalogs(this.options.runtime, undefined, { force: false });
 		this.tui.requestRender();
 
 		return new Promise<number>((resolve) => {
@@ -1056,18 +1060,20 @@ export class IoApp {
 		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
-			const models = available.models;
+			let models = available.models;
 			if (models.length === 0) {
 				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
 				return;
 			}
 			const current = this.session.model ?? this.options.model;
-			const items = models.map((model) => ({
-				id: model.id,
-				provider: model.provider,
-				name: model.name,
-				contextWindow: model.contextWindow,
-			}));
+			const toItems = (list: typeof models) =>
+				list.map((model) => ({
+					id: model.id,
+					provider: model.provider,
+					name: model.name,
+					contextWindow: model.contextWindow,
+				}));
+			const items = toItems(models);
 			const maxVisible = Math.max(5, Math.min(14, this.tui.terminal.rows - 8, items.length));
 			const picker = new ModelPicker(items, {
 				maxVisible,
@@ -1096,6 +1102,17 @@ export class IoApp {
 			});
 			this.tui.setFocus(picker);
 			this.tui.requestRender();
+			// Refresh catalogs in the background (like Pi's ModelSelector) so
+			// brand-new models land in the open list without closing it. The
+			// cached snapshot above stays on screen until the refresh lands.
+			void refreshCatalogs(this.options.runtime, undefined, { force: false }).then(async () => {
+				if (!this.activeOverlay) return;
+				const refreshed = await loadAvailableModels(this.options.runtime);
+				if (!this.activeOverlay || refreshed.models.length === 0) return;
+				models = refreshed.models;
+				picker.setItems(toItems(models));
+				this.tui.requestRender();
+			});
 		} catch (error) {
 			this.addNotice(`could not load models: ${(error as Error).message}`, { bold: true });
 		} finally {

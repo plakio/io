@@ -34,11 +34,16 @@ export async function createIoModelRuntime(
 	factory: RuntimeFactory = ModelRuntime.create,
 ): Promise<ModelRuntime> {
 	ensureIoDirectories(paths);
-	return factory({
+	const runtime = await factory({
 		authPath: paths.authPath,
-		modelsPath: null,
+		modelsPath: paths.modelsPath,
 		refreshOnCreate: false,
 	});
+	// Replay the persisted catalog overlay written by earlier refreshes, so
+	// models fetched by a previous `io models --refresh` survive across
+	// sessions. Offline only: no network here.
+	await restoreCatalogs(runtime);
+	return runtime;
 }
 
 export async function loadAvailableModels(
@@ -128,18 +133,25 @@ export async function logoutProvider(runtime: ModelRuntime, providerId: string):
 	await runtime.logout(providerId);
 }
 
+/** Replay persisted catalog overlays (from earlier refreshes). Never touches the network. */
+export async function restoreCatalogs(runtime: ModelRuntime): Promise<void> {
+	await runtime.refresh({ allowNetwork: false }).catch(() => undefined);
+}
+
 export async function refreshCatalogs(
 	runtime: ModelRuntime,
 	provider?: string,
-	timeoutMs = 15_000,
+	options: { timeoutMs?: number; force?: boolean } = {},
 ): Promise<{ aborted: boolean; errors: Map<string, Error> }> {
+	const timeoutMs = options.timeoutMs ?? 15_000;
+	const force = options.force ?? true;
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
 		const result = await runtime.refresh({
 			allowNetwork: true,
 			providers: provider ? [provider] : providerIds(),
-			force: true,
+			force,
 			signal: controller.signal,
 		});
 		return { aborted: result.aborted, errors: new Map(result.errors) };

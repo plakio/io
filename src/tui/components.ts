@@ -187,7 +187,7 @@ export class ModelPicker extends Container {
 		this.searchInput.focused = value;
 	}
 
-	private readonly allItems: ModelPickerItem[];
+	private allItems: ModelPickerItem[];
 	private filteredItems: ModelPickerItem[];
 	private selectedIndex = 0;
 	private readonly maxVisible: number;
@@ -242,6 +242,27 @@ export class ModelPicker extends Container {
 
 	getSelectedItem(): ModelPickerItem | undefined {
 		return this.filteredItems[this.selectedIndex];
+	}
+
+	/**
+	 * Replace the item list (used when a background catalog refresh lands).
+	 * Keeps the current filter text and, when possible, the selected model.
+	 */
+	setItems(items: ModelPickerItem[]): void {
+		const selected = this.selectedIndex >= 0 ? this.filteredItems[this.selectedIndex] : undefined;
+		this.allItems = items;
+		const query = this.searchInput.getValue();
+		this.filteredItems = query.trim().length > 0
+			? fuzzyFilter(this.allItems, query, (item) => modelSearchText(item))
+			: this.allItems;
+		const sameIndex = selected
+			? this.filteredItems.findIndex(
+					(item) => item.provider === selected.provider && item.id === selected.id,
+				)
+			: -1;
+		this.selectedIndex =
+			sameIndex >= 0 ? sameIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredItems.length - 1));
+		this.updateList();
 	}
 
 	private filterModels(query: string): void {

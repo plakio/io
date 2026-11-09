@@ -19,6 +19,7 @@ export interface IoPaths {
 	dataDir: string;
 	configPath: string;
 	authPath: string;
+	modelsPath: string;
 	sessionsDir: string;
 	deviceIdPath: string;
 }
@@ -46,6 +47,7 @@ export function resolvePaths(env: NodeJS.ProcessEnv = process.env, home = homedi
 		dataDir: dataBase,
 		configPath: join(configBase, "config.json"),
 		authPath: join(dataBase, "auth.json"),
+		modelsPath: join(dataBase, "models.json"),
 		sessionsDir: join(dataBase, "sessions"),
 		deviceIdPath: join(dataBase, "device-id"),
 	};

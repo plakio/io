@@ -139,6 +139,28 @@ test("model picker moves with Down and shows the no-match state", () => {
 	assert.match(rendered, /No matching models/);
 });
 
+test("model picker swaps items on refresh while keeping the filter", () => {
+	const picker = new ModelPicker(PICKER_ITEMS, {
+		maxVisible: 5,
+		onSelect: () => {},
+		onCancel: () => {},
+	});
+	for (const char of "kimi") picker.handleInput(char);
+	assert.equal(picker.getSelectedItem()?.id, "kimi-k3");
+	picker.setItems([
+		...PICKER_ITEMS,
+		{ id: "crouton-alpha-free", provider: "opencode-go", name: "Crouton Alpha Free", contextWindow: 1000000 },
+	]);
+	// Filter text is untouched, so the new model only appears once it matches.
+	assert.equal(picker.getSelectedItem()?.id, "kimi-k3");
+	for (let i = 0; i < 4; i++) picker.handleInput("\x7f");
+	for (const char of "crout") picker.handleInput(char);
+	assert.equal(picker.getSelectedItem()?.id, "crouton-alpha-free");
+	const rendered = stripTerminalSequences(picker.render(80).join("\n"));
+	assert.match(rendered, /crouton-alpha-free/);
+	assert.match(rendered, /\[opencode-go\]/);
+});
+
 test("dynamic border fills the viewport width", () => {
 	const lines = new DynamicBorder().render(20);
 	assert.equal(lines.length, 1);

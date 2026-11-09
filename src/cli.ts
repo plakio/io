@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import "./pi-env.js";
 import { parseArgs, HELP_TEXT } from "./args.js";
 import { resolvePaths } from "./config.js";
 import { CliError } from "./errors.js";

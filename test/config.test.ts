@@ -25,6 +25,7 @@ test("resolvePaths honors XDG directories", () => {
 	assert.equal(paths.configDir, "/x/config/io");
 	assert.equal(paths.dataDir, "/x/data/io");
 	assert.equal(paths.authPath, "/x/data/io/auth.json");
+	assert.equal(paths.modelsPath, "/x/data/io/models.json");
 	assert.equal(paths.sessionsDir, "/x/data/io/sessions");
 });
 
