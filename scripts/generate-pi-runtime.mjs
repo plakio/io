@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The bundled Pi SDK detects its own version by walking up to the nearest
@@ -14,4 +14,17 @@ const descriptor = {
 };
 mkdirSync(join("dist", "runtime"), { recursive: true });
 writeFileSync(join("dist", "runtime", "package.json"), `${JSON.stringify(descriptor, null, 2)}\n`);
+
+// Pi's interactive components load their theme JSON from disk using
+// PI_PACKAGE_DIR. In io's bundle that points at runtime/, so ship the built-in
+// themes where getThemesDir() looks for them.
+const themeSource = new URL(
+	"../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/",
+	import.meta.url,
+);
+const themeTarget = join("dist", "runtime", "dist", "modes", "interactive", "theme");
+mkdirSync(themeTarget, { recursive: true });
+for (const name of ["dark.json", "light.json"]) {
+	cpSync(new URL(name, themeSource), join(themeTarget, name));
+}
 process.stdout.write(`Wrote dist/runtime/package.json (pi ${descriptor.version})\n`);

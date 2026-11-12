@@ -126,6 +126,8 @@ export interface Harness {
 	resumed: boolean;
 	sessionFile?: SessionFile;
 	modelFallbackMessage?: string;
+	/** Tool definitions, so the TUI can reuse Pi's renderers. */
+	tools: ToolDefinition<any, any, any>[];
 	agent: AgentDefinition;
 	agentCatalog: AgentCatalog;
 	/** Resolved context flags, preserved when the harness is replaced (/new, /resume, /fork). */
@@ -255,6 +257,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		);
 	}
 
+	const customTools = [bashTool, ...extraTools] as unknown as ToolDefinition[];
 	const created = await createAgentSession({
 		cwd: options.cwd,
 		agentDir: options.paths.dataDir,
@@ -265,7 +268,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		sessionManager: resolved.manager,
 		settingsManager,
 		tools: ["bash"],
-		customTools: [bashTool, ...extraTools] as unknown as ToolDefinition[],
+		customTools,
 	});
 
 	const session = created.session;
@@ -311,6 +314,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		resumed: options.sessionId !== undefined || (options.continueSession === true && hadExistingMessages),
 		sessionFile: resolved.session,
 		modelFallbackMessage: created.modelFallbackMessage,
+		tools: customTools,
 		agent,
 		agentCatalog: catalog,
 		context: { skills, contextFiles },

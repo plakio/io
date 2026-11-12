@@ -13,11 +13,21 @@ import { fileURLToPath } from "node:url";
  * generated at build time with the Pi SDK's real name/version). Point the SDK
  * at it via PI_PACKAGE_DIR before any Pi module loads. In dev (tsx) there is
  * no descriptor next to src/, detection finds the real package, and this
- * no-ops. A pre-set PI_PACKAGE_DIR always wins.
+ * no-ops. A pre-set PI_PACKAGE_DIR wins unless it lacks the theme assets.
  */
-if (process.env.PI_PACKAGE_DIR === undefined) {
-	const descriptorDir = join(dirname(fileURLToPath(import.meta.url)), "runtime");
-	if (existsSync(join(descriptorDir, "package.json"))) {
+function hasThemes(dir: string): boolean {
+	return (
+		existsSync(join(dir, "dist", "modes", "interactive", "theme", "dark.json")) ||
+		existsSync(join(dir, "src", "modes", "interactive", "theme", "dark.json"))
+	);
+}
+
+const descriptorDir = join(dirname(fileURLToPath(import.meta.url)), "runtime");
+if (existsSync(join(descriptorDir, "package.json"))) {
+	// Pre-set values still win unless they point at a runtime without the Pi
+	// theme assets (e.g. an io process whose bash tool launched this one).
+	const configured = process.env.PI_PACKAGE_DIR;
+	if (configured === undefined || !hasThemes(configured)) {
 		process.env.PI_PACKAGE_DIR = descriptorDir;
 	}
 }

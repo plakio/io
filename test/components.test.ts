@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { fuzzyFilter, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { fuzzyFilter, stripTerminalSequences, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import {
 	AssistantBlock,
 	ConfirmOverlay,
@@ -12,6 +13,12 @@ import {
 	distinctModelName,
 	modelSearchText,
 } from "../src/tui/components.js";
+import {
+	AssistantBlock as PiAssistantBlock,
+	ToolBlock as PiToolBlock,
+	UserBlock as PiUserBlock,
+} from "../src/tui/pi-components.js";
+import { initPiVisuals } from "../src/tui/pi-theme.js";
 
 test("tool blocks preview long output and expand on request", () => {
 	const output = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
@@ -221,4 +228,32 @@ test("footer shows the spinner frame while busy and omits it when idle", () => {
 	const idleLine = footer.render(120)[0] ?? "";
 	assert.match(idleLine, /ready/);
 	assert.doesNotMatch(idleLine, /⠋/);
+});
+
+test("pi components render user, assistant and bash blocks", () => {
+	initPiVisuals();
+	const user = new PiUserBlock("hola desde el usuario");
+	const userRendered = user.render(60).join("\n");
+	assert.match(stripTerminalSequences(userRendered), /hola desde el usuario/);
+	assert.doesNotMatch(userRendered, /\x1b\]133;/);
+
+	const assistant = new PiAssistantBlock(() => {});
+	assistant.setMessage(fauxAssistantMessage("hola desde el asistente"), false);
+	const assistantRendered = stripTerminalSequences(assistant.render(60).join("\n"));
+	assert.match(assistantRendered, /hola desde el asistente/);
+
+	const ui = { requestRender() {} } as unknown as TUI;
+	const tool = new PiToolBlock({
+		toolName: "bash",
+		toolCallId: "test-1",
+		args: { command: "echo hola" },
+		cwd: process.cwd(),
+		ui,
+		toolDefinition: createBashToolDefinition(process.cwd()),
+	});
+	tool.markStarted();
+	tool.setResult({ content: [{ type: "text", text: "hola" }] }, false, 5);
+	const toolRendered = stripTerminalSequences(tool.render(60).join("\n"));
+	assert.match(toolRendered, /\$ echo hola/);
+	assert.match(toolRendered, /hola/);
 });

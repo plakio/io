@@ -2,7 +2,7 @@
 
 IO is a minimal AI harness for the terminal, developed and maintained by [Plak](https://github.com/plakio).
 
-It gives the model one tool — a Bash shell — and keeps everything else small: a monochrome terminal interface, persistent sessions, real token accounting, and the [Pi SDK](https://github.com/earendil-works/pi) underneath.
+It gives the model one tool — a Bash shell — and keeps everything else small: a Pi-styled terminal interface, persistent sessions, real token accounting, and the [Pi SDK](https://github.com/earendil-works/pi) underneath.
 
 IO is not only a coding agent. It is useful for programming, file manipulation, system administration, repository work, research with standard command-line utilities, and automation.
 
@@ -28,7 +28,7 @@ There is no MCP integration, plugin marketplace, subagent system, browser automa
 - Input tokens, output tokens, context usage, and generation speed from actual SDK/provider data.
 - Git change inspection with `/diff`.
 - Dangerous-command confirmation, visible commands, and Ctrl+C/Esc cancellation.
-- Minimal, keyboard-first, monochrome interface.
+- Minimal, keyboard-first interface styled with Pi's terminal components (`IO_PI_THEME=light` switches the theme).
 
 ## Requirements
 

@@ -10,6 +10,7 @@ import {
 	CombinedAutocompleteProvider,
 	Container,
 	Key,
+	Loader,
 	fuzzyFilter,
 	getNativeClipboard,
 	matchesKey,
@@ -19,10 +20,15 @@ import {
 	Text,
 	TuiMainScreen,
 	stripTerminalSequences,
+	type Component,
 	type OverlayHandle,
 	type ProgramStatus,
 } from "@earendil-works/pi-tui";
 import type { SlashCommand } from "@earendil-works/pi-tui";
+import {
+	ModelSelectorComponent,
+	ThinkingSelectorComponent,
+} from "@earendil-works/pi-coding-agent";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths, ThinkingLevel } from "../config.js";
 import { ensureIoDirectories, loadConfig, saveConfig } from "../config.js";
@@ -40,21 +46,18 @@ import {
 import { getPrimaryAgents, type AgentCatalog } from "../agents.js";
 import { VERSION } from "../version.js";
 import {
-	AssistantBlock,
 	ConfirmOverlay,
 	DynamicBorder,
-	Footer,
-	ModelPicker,
 	NoticeBlock,
 	PaddedBox,
 	ScopedModelsPicker,
 	SessionPicker,
-	ToolBlock,
-	UserBlock,
 	modelSearchText,
 } from "./components.js";
 import { IoEditor } from "./editor.js";
-import { editorTheme, selectListTheme, style } from "./theme.js";
+import { AssistantBlock, Footer, ToolBlock, UserBlock } from "./pi-components.js";
+import { initPiVisuals, piAccent, piEditorTheme, piMuted } from "./pi-theme.js";
+import { selectListTheme, style } from "./theme.js";
 
 const HELP = `Commands
 
@@ -117,6 +120,10 @@ export class IoApp {
 	private readonly transcript: Container;
 	private readonly editor: IoEditor;
 	private readonly footer: Footer;
+	private readonly statusContainer: Container;
+	private statusLoader: Loader | undefined;
+	private statusLoaderMessage: string | undefined;
+	private overlayDispose: (() => void) | undefined;
 	private session: Harness["session"];
 	private unsubscribe: (() => void) | undefined;
 	private resolveExit: ((code: number) => void) | undefined;
@@ -152,6 +159,7 @@ export class IoApp {
 	private spinnerTimer: NodeJS.Timeout | undefined;
 
 	constructor(options: IoAppOptions) {
+		initPiVisuals();
 		this.options = options;
 		this.session = options.harness.session;
 		this.config = { ...options.config };
@@ -166,12 +174,14 @@ export class IoApp {
 			0,
 		);
 		this.transcript = new Container();
-		this.editor = new IoEditor(this.tui, editorTheme);
-		this.footer = new Footer();
+		this.statusContainer = new Container();
+		this.editor = new IoEditor(this.tui, piEditorTheme());
+		this.footer = new Footer(this.session, options.runtime);
 
 		this.tui.addChild(this.header);
 		this.tui.addChild(new Spacer(1));
 		this.tui.addChild(this.transcript);
+		this.tui.addChild(this.statusContainer);
 		this.tui.addChild(new Spacer(1));
 		this.tui.addChild(this.editor);
 		this.tui.addChild(this.footer);
@@ -252,7 +262,7 @@ export class IoApp {
 		this.addNotice("type /help for commands", { dim: true });
 	}
 
-	private addBlock(component: Text | UserBlock | AssistantBlock | ToolBlock, options: { spacing?: boolean } = {}): void {
+	private addBlock(component: Component, options: { spacing?: boolean } = {}): void {
 		if (options.spacing !== false && this.transcript.children.length > 0) {
 			this.transcript.addChild(new Spacer(1));
 		}
@@ -335,7 +345,15 @@ export class IoApp {
 					typeof event.args === "object" && event.args !== null && "command" in event.args
 						? String((event.args as { command?: unknown }).command ?? "")
 						: (JSON.stringify(event.args) ?? String(event.args));
-				const block = new ToolBlock(event.toolName, command, () => this.tui.requestRender());
+				const block = new ToolBlock({
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					args: event.args,
+					cwd: this.options.cwd,
+					ui: this.tui,
+					toolDefinition: this.options.harness.tools.find((tool) => tool.name === event.toolName),
+				});
+				block.markStarted();
 				this.toolBlocks.push(block);
 				this.activeTools.set(event.toolCallId, block);
 				this.bumpActivity(event.toolName);
@@ -471,9 +489,38 @@ export class IoApp {
 
 	private updateFooterAndTitle(): void {
 		this.updateFooter();
+		this.updateWorkingIndicator();
 		this.updateTerminalTitle();
 		this.updateProgramStatus();
 		this.updateSpinnerTimer();
+	}
+
+	/** Pi-style braille spinner above the editor while work is in flight. */
+	private updateWorkingIndicator(): void {
+		const active = this.busy || this.session.isStreaming || this.status !== undefined;
+		if (!active) {
+			if (!this.statusLoader) return;
+			this.statusLoader.stop();
+			this.statusContainer.clear();
+			this.statusLoader = undefined;
+			this.statusLoaderMessage = undefined;
+			this.tui.requestRender();
+			return;
+		}
+		const message = this.status
+			? this.status.charAt(0).toUpperCase() + this.status.slice(1)
+			: "Working";
+		if (!this.statusLoader) {
+			this.statusLoader = new Loader(this.tui, piAccent, piMuted, message, { intervalMs: 80 });
+			this.statusLoaderMessage = message;
+			this.statusContainer.addChild(this.statusLoader);
+			this.statusLoader.start();
+			return;
+		}
+		if (message !== this.statusLoaderMessage) {
+			this.statusLoaderMessage = message;
+			this.statusLoader.setMessage(message);
+		}
 	}
 
 	private updateThinkingCount(message: AssistantMessage): boolean {
@@ -756,7 +803,15 @@ export class IoApp {
 		this.status = "running shell";
 		this.updateFooterAndTitle();
 		const started = Date.now();
-		const block = new ToolBlock("bash", command, () => this.tui.requestRender());
+		const block = new ToolBlock({
+			toolName: "bash",
+			toolCallId: `inline-${Date.now()}`,
+			args: { command },
+			cwd: this.options.cwd,
+			ui: this.tui,
+			toolDefinition: this.options.harness.tools.find((tool) => tool.name === "bash"),
+		});
+		block.markStarted();
 		this.toolBlocks.push(block);
 		this.addBlock(block);
 		let output = "";
@@ -889,45 +944,29 @@ export class IoApp {
 			return;
 		}
 		const current = this.session.thinkingLevel;
-		const items = levels.map((level) => ({
-			value: level,
-			label: level,
-			description: level === current ? "current" : "",
-		}));
-		const list = new SelectList(items, Math.min(levels.length, 10), selectListTheme);
-		if (current) {
-			const index = levels.indexOf(current);
-			if (index >= 0) list.setSelectedIndex(index);
-		}
-		const box = new Container();
-		box.addChild(new DynamicBorder());
-		box.addChild(new Text(style.bold("Select thinking effort"), 0, 0));
-		box.addChild(new Spacer(1));
-		box.addChild(list);
-		box.addChild(new Spacer(1));
-		box.addChild(new Text(style.dim("↑↓ move · enter select · esc cancel"), 0, 0));
-		box.addChild(new Spacer(1));
-		box.addChild(new DynamicBorder());
+		const picker = new ThinkingSelectorComponent(
+			current as never,
+			levels as never[],
+			(level) => {
+				this.status = undefined;
+				this.closeOverlay();
+				void this.applyEffort(level);
+				this.updateFooterAndTitle();
+			},
+			() => {
+				this.status = undefined;
+				this.closeOverlay();
+				this.updateFooterAndTitle();
+			},
+		);
 
-		list.onSelect = (item) => {
-			this.status = undefined;
-			this.closeOverlay();
-			void this.applyEffort(item.value);
-			this.updateFooterAndTitle();
-		};
-		list.onCancel = () => {
-			this.status = undefined;
-			this.closeOverlay();
-			this.updateFooterAndTitle();
-		};
-
-		this.activeOverlay = this.tui.showOverlay(new PaddedBox(box), {
+		this.activeOverlay = this.tui.showOverlay(picker, {
 			anchor: "center",
 			width: this.tui.terminal.columns,
-			maxHeight: "60%",
+			maxHeight: "70%",
 			margin: 0,
 		});
-		this.tui.setFocus(list);
+		this.tui.setFocus(picker);
 		this.tui.requestRender();
 	}
 
@@ -1018,6 +1057,7 @@ export class IoApp {
 		const old = this.session;
 		this.session = replacement.harness.session;
 		this.options = { ...this.options, harness: replacement.harness };
+		this.footer.setSession(this.session);
 		this.subscribe();
 		this.updateAgentAutocomplete();
 		this.transcript.clear();
@@ -1262,59 +1302,41 @@ export class IoApp {
 		this.updateFooterAndTitle();
 		try {
 			const available = await loadAvailableModels(this.options.runtime);
-			let models = available.models;
-			if (models.length === 0) {
+			if (available.models.length === 0) {
 				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
 				return;
 			}
-			const current = this.session.model ?? this.options.model;
-			const toItems = (list: typeof models) =>
-				list.map((model) => ({
-					id: model.id,
-					provider: model.provider,
-					name: model.name,
-					contextWindow: model.contextWindow,
-				}));
-			const items = toItems(models);
-			const maxVisible = Math.max(5, Math.min(14, this.tui.terminal.rows - 8, items.length));
-			const picker = new ModelPicker(items, {
-				maxVisible,
-				currentValue: current ? modelReference(current as Model<any>) : undefined,
-				onSelect: (item) => {
+			const current = (this.session.model ?? this.options.model) as Model<any> | undefined;
+			const scopedRefs = this.config.scopedModels ?? [];
+			const scoped = scopedRefs.length > 0
+				? available.models.filter((model) => scopedRefs.includes(modelReference(model)))
+				: available.models;
+			const picker = new ModelSelectorComponent(
+				this.tui,
+				current,
+				this.options.runtime,
+				(scoped.length > 0 ? scoped : available.models).map((model) => ({ model })),
+				(model) => {
 					this.status = undefined;
 					this.closeOverlay();
-					const model = models.find(
-						(candidate) => modelReference(candidate) === `${item.provider}/${item.id}`,
-					);
-					if (model) void this.applyModel(model);
+					void this.applyModel(model);
 					this.updateFooterAndTitle();
 				},
-				onCancel: () => {
+				() => {
 					this.status = undefined;
 					this.closeOverlay();
 					this.updateFooterAndTitle();
 				},
-			});
-
-			this.activeOverlay = this.tui.showOverlay(new PaddedBox(picker), {
+			);
+			this.overlayDispose = () => picker.dispose();
+			this.activeOverlay = this.tui.showOverlay(picker, {
 				anchor: "center",
 				width: this.tui.terminal.columns,
-				maxHeight: "80%",
+				maxHeight: "85%",
 				margin: 0,
 			});
 			this.tui.setFocus(picker);
 			this.tui.requestRender();
-			// Refresh catalogs in the background (like Pi's ModelSelector) so
-			// brand-new models land in the open list without closing it. The
-			// cached snapshot above stays on screen until the refresh lands.
-			void refreshCatalogs(this.options.runtime, undefined, { force: false }).then(async () => {
-				if (!this.activeOverlay) return;
-				const refreshed = await loadAvailableModels(this.options.runtime);
-				if (!this.activeOverlay || refreshed.models.length === 0) return;
-				models = refreshed.models;
-				picker.setItems(toItems(models));
-				this.tui.requestRender();
-			});
 		} catch (error) {
 			this.addNotice(`could not load models: ${(error as Error).message}`, { bold: true });
 		} finally {
@@ -1326,6 +1348,8 @@ export class IoApp {
 	}
 
 	private closeOverlay(): void {
+		this.overlayDispose?.();
+		this.overlayDispose = undefined;
 		if (!this.activeOverlay) return;
 		this.activeOverlay.hide();
 		this.activeOverlay = undefined;
