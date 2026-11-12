@@ -2,42 +2,49 @@ import { loadConfig, saveConfig, type IoPaths } from "../config.js";
 import { CliError } from "../errors.js";
 import { formatTokens } from "../format.js";
 import { LinePrompter } from "../term-prompt.js";
-import { getSupportedProvider, modelReference, providerIds, providerName } from "../providers.js";
+import { getSupportedProvider, isSupportedProvider, modelReference } from "../providers.js";
 import {
 	createIoModelRuntime,
+	knownProviderIds,
 	loadAvailableModels,
+	providerDisplayName,
 	refreshCatalogs,
-	supportedProviderOrThrow,
 } from "../runtime.js";
 
 export async function runModels(
 	paths: IoPaths,
 	options: { provider?: string; refresh: boolean },
 ): Promise<void> {
-	if (options.provider && !getSupportedProvider(options.provider)) {
+	const runtime = await createIoModelRuntime(paths);
+	if (options.provider && !knownProviderIds(runtime).includes(options.provider)) {
 		throw new CliError(
-			`Unknown provider "${options.provider}". Supported providers: ${providerIds().join(", ")}.`,
+			`Unknown provider "${options.provider}". Configured providers: ${knownProviderIds(runtime).join(", ")}.\nAdd custom providers in ${paths.modelsPath}.`,
 		);
 	}
-	const provider = options.provider ? supportedProviderOrThrow(options.provider) : undefined;
-	const runtime = await createIoModelRuntime(paths);
+	const provider = options.provider;
 
 	if (options.refresh) {
-		process.stdout.write("Refreshing model catalogs…\n");
-		const refreshed = await refreshCatalogs(runtime, provider);
-		if (refreshed.aborted) {
-			process.stdout.write("Model refresh timed out; using cached catalogs.\n");
-		} else if (refreshed.errors.size > 0) {
-			const details = [...refreshed.errors.entries()]
-				.map(([providerId, error]) => `${providerName(providerId)}: ${error.message}`)
-				.join("; ");
-			process.stdout.write(`Model refresh incomplete (${details}); using cached catalogs.\n`);
+		if (provider && !isSupportedProvider(provider)) {
+			process.stdout.write(
+				`${providerDisplayName(runtime, provider)} uses a static models.json catalog; nothing to refresh.\n`,
+			);
+		} else {
+			process.stdout.write("Refreshing model catalogs…\n");
+			const refreshed = await refreshCatalogs(runtime, provider);
+			if (refreshed.aborted) {
+				process.stdout.write("Model refresh timed out; using cached catalogs.\n");
+			} else if (refreshed.errors.size > 0) {
+				const details = [...refreshed.errors.entries()]
+					.map(([providerId, error]) => `${providerDisplayName(runtime, providerId)}: ${error.message}`)
+					.join("; ");
+				process.stdout.write(`Model refresh incomplete (${details}); using cached catalogs.\n`);
+			}
 		}
 	}
 
 	const available = await loadAvailableModels(runtime, provider);
 	const config = loadConfig(paths).config;
-	const providersToList = provider ? [provider] : providerIds();
+	const providersToList = provider ? [provider] : available.providers;
 	let printedAny = false;
 	const allModels = providersToList.flatMap((providerId) =>
 		available.models.filter((model) => model.provider === providerId),
@@ -48,12 +55,12 @@ export async function runModels(
 		const error = available.errors.get(providerId);
 		if (models.length === 0) {
 			if (error) {
-				process.stdout.write(`${providerName(providerId)}: ${error.message}\n`);
+				process.stdout.write(`${providerDisplayName(runtime, providerId)}: ${error.message}\n`);
 			}
 			continue;
 		}
 		printedAny = true;
-		process.stdout.write(`\n${providerName(providerId)} (${providerId})\n`);
+		process.stdout.write(`\n${providerDisplayName(runtime, providerId)} (${providerId})\n`);
 		const idWidth = Math.max(...models.map((model) => model.id.length), 4);
 		for (const model of models) {
 			const preferred =
@@ -69,8 +76,12 @@ export async function runModels(
 		const hint = provider
 			? getSupportedProvider(provider)?.loginHint
 			: "io auth login opencode-go (or export OPENCODE_API_KEY)";
+		const customHint =
+			provider && !isSupportedProvider(provider)
+				? `\nSet the apiKey or its environment variable in: ${paths.modelsPath}`
+				: "";
 		throw new CliError(
-			`No authenticated models found.${hint ? `\nAuthenticate with: ${hint}` : ""}`,
+			`No authenticated models found.${hint ? `\nAuthenticate with: ${hint}` : ""}${customHint}`,
 		);
 	}
 	if (provider === undefined) {

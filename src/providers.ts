@@ -77,7 +77,7 @@ function chooseFirst(models: readonly Model<Api>[]): Model<Api> | undefined {
 export function selectModel(
 	models: readonly Model<Api>[],
 	preference: ModelPreference,
-	options: { modelRef?: string; provider?: string } = {},
+	options: { modelRef?: string; provider?: string; knownProviders?: readonly string[] } = {},
 ): ModelSelectionResult {
 	if (models.length === 0) {
 		return {
@@ -86,18 +86,25 @@ export function selectModel(
 		};
 	}
 
+	const known = new Set<string>([...providerIds(), ...(options.knownProviders ?? [])]);
 	const restricted = options.provider ? models.filter((model) => model.provider === options.provider) : models;
 	if (options.provider && restricted.length === 0) {
 		const knownProvider = getSupportedProvider(options.provider);
-		if (!knownProvider) {
+		if (knownProvider) {
 			return {
 				ok: false,
-				error: `Unknown provider "${options.provider}". Supported providers: ${providerIds().join(", ")}.`,
+				error: `No models are available for ${knownProvider.name}. Run \`${knownProvider.loginHint}\`.`,
+			};
+		}
+		if (!known.has(options.provider)) {
+			return {
+				ok: false,
+				error: `Unknown provider "${options.provider}". Configured providers: ${[...known].join(", ")}.`,
 			};
 		}
 		return {
 			ok: false,
-			error: `No models are available for ${knownProvider.name}. Run \`${knownProvider.loginHint}\`.`,
+			error: `No models are available for provider "${options.provider}". Check its apiKey or environment variable in models.json.`,
 		};
 	}
 
@@ -113,17 +120,11 @@ export function selectModel(
 				error: `Model "${options.modelRef}" is not available. Run \`io models\` to list authenticated models.`,
 			};
 		}
-		if (!isSupportedProvider(match.provider)) {
-			return {
-				ok: false,
-				error: `Provider "${match.provider}" is not supported by this version of io.`,
-			};
-		}
 		return { ok: true, selection: { model: match } };
 	}
 
 	const preferredProvider = options.provider ?? preference.provider;
-	if (preferredProvider && !isSupportedProvider(preferredProvider)) {
+	if (preferredProvider && !known.has(preferredProvider)) {
 		const fallback = chooseFirst(restricted);
 		return {
 			ok: true,
@@ -174,8 +175,4 @@ export function selectModel(
 	}
 
 	return { ok: true, selection: { model: chooseFirst(restricted) as Model<Api> } };
-}
-
-export function filterSupportedModels(models: readonly Model<Api>[]): Model<Api>[] {
-	return models.filter((model) => isSupportedProvider(model.provider));
 }

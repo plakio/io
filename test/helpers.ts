@@ -38,6 +38,7 @@ export async function createFauxHarness(options: {
 	sessionManager?: SessionManager;
 	paths?: IoPaths;
 	tokensPerSecond?: number;
+	context?: { skills?: boolean; contextFiles?: boolean };
 } = {}): Promise<FauxHarness> {
 	const temporary = options.paths ? { paths: options.paths, cleanup: () => {} } : temporaryPaths();
 	const { paths, cleanup } = temporary;
@@ -57,6 +58,7 @@ export async function createFauxHarness(options: {
 		continueSession: options.continueSession,
 		sessionManager: options.sessionManager,
 		confirmCommand: options.confirmCommand,
+		context: options.context,
 	});
 	return { faux, runtime, paths, harness, cleanup };
 }

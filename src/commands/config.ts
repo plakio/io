@@ -9,16 +9,15 @@ import { CliError } from "../errors.js";
 import { formatTokens } from "../format.js";
 import { LinePrompter } from "../term-prompt.js";
 import {
-	SUPPORTED_PROVIDERS,
-	isSupportedProvider,
+	getSupportedProvider,
 	parseModelReference,
 	providerIds,
-	providerName,
 } from "../providers.js";
 import {
 	createIoModelRuntime,
 	getProviderStatuses,
 	loadAvailableModels,
+	readConfiguredProviderIds,
 } from "../runtime.js";
 
 export function runConfigShow(paths: IoPaths): void {
@@ -27,17 +26,26 @@ export function runConfigShow(paths: IoPaths): void {
 	process.stdout.write(`provider   ${config.provider ?? "—"}\n`);
 	process.stdout.write(`model      ${config.model ?? "—"}\n`);
 	process.stdout.write(`thinking   ${config.thinkingLevel ?? "—"}\n`);
+	process.stdout.write(`skills     ${config.skills === false ? "off" : "on"}\n`);
+	process.stdout.write(`context    ${config.contextFiles === false ? "off" : "on"}\n`);
 	process.stdout.write(`config     ${paths.configPath}\n`);
 	process.stdout.write(`data       ${paths.dataDir}\n`);
 	process.stdout.write(`credentials ${paths.authPath}\n`);
 	process.stdout.write(`sessions   ${paths.sessionsDir}\n`);
 }
 
-function updateConfig(config: IoConfig, key: string, value: string): IoConfig {
+function updateConfig(
+	config: IoConfig,
+	key: string,
+	value: string,
+	knownProviders: readonly string[],
+): IoConfig {
 	switch (key) {
 		case "provider": {
-			if (!isSupportedProvider(value)) {
-				throw new CliError(`Unknown provider "${value}". Supported providers: ${providerIds().join(", ")}.`);
+			if (!knownProviders.includes(value)) {
+				throw new CliError(
+					`Unknown provider "${value}". Configured providers: ${knownProviders.join(", ")}. Add custom providers in models.json.`,
+				);
 			}
 			const next: IoConfig = { ...config, provider: value };
 			if (config.provider !== value) delete next.model;
@@ -45,8 +53,10 @@ function updateConfig(config: IoConfig, key: string, value: string): IoConfig {
 		}
 		case "model": {
 			const parsed = parseModelReference(value);
-			if (parsed.provider && !isSupportedProvider(parsed.provider)) {
-				throw new CliError(`Unknown provider "${parsed.provider}". Supported providers: ${providerIds().join(", ")}.`);
+			if (parsed.provider && !knownProviders.includes(parsed.provider)) {
+				throw new CliError(
+					`Unknown provider "${parsed.provider}". Configured providers: ${knownProviders.join(", ")}. Add custom providers in models.json.`,
+				);
 			}
 			if (!parsed.model) throw new CliError("model must not be empty");
 			const next: IoConfig = { ...config, model: parsed.model };
@@ -60,17 +70,46 @@ function updateConfig(config: IoConfig, key: string, value: string): IoConfig {
 			}
 			return { ...config, thinkingLevel: value as IoConfig["thinkingLevel"] };
 		}
+		case "skills":
+		case "contextFiles": {
+			const parsed = parseBoolean(value);
+			if (parsed === undefined) {
+				throw new CliError(`Invalid value "${value}" for ${key}. Use on or off.`);
+			}
+			return key === "skills" ? { ...config, skills: parsed } : { ...config, contextFiles: parsed };
+		}
 		default:
-			throw new CliError(`Unknown config key "${key}". Use provider, model, or thinking.`);
+			throw new CliError(`Unknown config key "${key}". Use provider, model, thinking, skills, or contextFiles.`);
+	}
+}
+
+function parseBoolean(value: string): boolean | undefined {
+	switch (value.trim().toLowerCase()) {
+		case "true":
+		case "on":
+		case "yes":
+		case "1":
+			return true;
+		case "false":
+		case "off":
+		case "no":
+		case "0":
+			return false;
+		default:
+			return undefined;
 	}
 }
 
 export function runConfigSet(paths: IoPaths, key: string, value: string): void {
 	const current = loadConfig(paths).config;
-	const next = updateConfig(current, key, value);
+	const knownProviders: string[] = [...providerIds()];
+	for (const id of readConfiguredProviderIds(paths.modelsPath)) {
+		if (!knownProviders.includes(id)) knownProviders.push(id);
+	}
+	const next = updateConfig(current, key, value, knownProviders);
 	saveConfig(paths, next);
 	process.stdout.write(`Saved ${paths.configPath}\n`);
-	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"}\n`);
+	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · skills ${next.skills === false ? "off" : "on"} · context ${next.contextFiles === false ? "off" : "on"}\n`);
 }
 
 export async function runConfigInteractive(paths: IoPaths): Promise<void> {
@@ -88,14 +127,17 @@ export async function runConfigInteractive(paths: IoPaths): Promise<void> {
 		process.stdout.write(`  thinking: ${current.thinkingLevel ?? "—"}\n\n`);
 
 		const statuses = await getProviderStatuses(runtime);
-		const providerOptions = SUPPORTED_PROVIDERS.map((provider) => {
-			const status = statuses.find((entry) => entry.id === provider.id);
+		const providerOptions = statuses.map((status) => {
+			const builtIn = getSupportedProvider(status.id);
+			const description = status.configured
+				? `${status.source ?? "configured"} · ${status.modelCount} model${status.modelCount === 1 ? "" : "s"}`
+				: builtIn
+					? "not configured"
+					: "models.json · not configured";
 			return {
-				id: provider.id,
-				label: provider.name,
-				description: status?.configured
-					? `${status.source ?? "configured"} · ${status.modelCount} model${status.modelCount === 1 ? "" : "s"}`
-					: "not configured",
+				id: status.id,
+				label: status.name,
+				description,
 			};
 		});
 		const provider = await prompter.select("Select provider:", providerOptions);

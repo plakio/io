@@ -14,6 +14,25 @@ export interface IoConfig {
 	agents?: Record<string, { model?: string }>;
 	/** `provider/id` refs that Ctrl+P cycles through. Empty/undefined means all. */
 	scopedModels?: string[];
+	/** Shell permission rules (action is always `shell`). Last matching rule wins. */
+	permissions?: ShellPermissionRule[];
+	/** Load AGENTS.md/CLAUDE.md from the cwd and its ancestors. Default true. */
+	contextFiles?: boolean;
+	/** Load skills from ~/.agents/skills and <cwd>/.agents/skills. Default true. */
+	skills?: boolean;
+}
+
+/** Context settings with their defaults resolved. */
+export function resolveContextSettings(config: IoConfig): { skills: boolean; contextFiles: boolean } {
+	return { skills: config.skills !== false, contextFiles: config.contextFiles !== false };
+}
+
+export type ShellPermissionEffect = "allow" | "deny" | "ask";
+
+export interface ShellPermissionRule {
+	/** Wildcard pattern matched against the whole normalized shell command. `*` spans anything, `?` one char. */
+	resource: string;
+	effect: ShellPermissionEffect;
 }
 
 export interface IoPaths {
@@ -96,6 +115,39 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		config.scopedModels = input.scopedModels as string[];
 	} else if (input.scopedModels !== undefined) {
 		warnings.push("ignoring invalid config value: scopedModels");
+	}
+	if (Array.isArray(input.permissions)) {
+		const rules: ShellPermissionRule[] = [];
+		let invalid = false;
+		for (const rule of input.permissions) {
+			if (rule && typeof rule === "object" && "resource" in rule && "effect" in rule) {
+				const resource = (rule as { resource?: unknown }).resource;
+				const effect = (rule as { effect?: unknown }).effect;
+				if (
+					typeof resource === "string" &&
+					resource.length > 0 &&
+					(effect === "allow" || effect === "deny" || effect === "ask")
+				) {
+					rules.push({ resource, effect });
+				} else {
+					invalid = true;
+				}
+			} else {
+				invalid = true;
+			}
+		}
+		if (invalid) warnings.push("ignoring invalid entries in permissions");
+		if (rules.length > 0) config.permissions = rules;
+	}
+	if (typeof input.contextFiles === "boolean") {
+		config.contextFiles = input.contextFiles;
+	} else if (input.contextFiles !== undefined) {
+		warnings.push("ignoring invalid config value: contextFiles");
+	}
+	if (typeof input.skills === "boolean") {
+		config.skills = input.skills;
+	} else if (input.skills !== undefined) {
+		warnings.push("ignoring invalid config value: skills");
 	}
 	if (input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)) {
 		const agents: NonNullable<IoConfig["agents"]> = {};

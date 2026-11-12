@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assessCommand, isDangerousCommand, sanitizeBashEnvironment } from "../src/safety.js";
+import {
+	assessCommand,
+	decideShellPermission,
+	isDangerousCommand,
+	sanitizeBashEnvironment,
+	shellPatternFor,
+	wildcardMatch,
+} from "../src/safety.js";
 
 test("dangerous commands are detected", () => {
 	const commands = [
@@ -56,11 +63,51 @@ test("provider API keys are removed from bash environments", () => {
 	const env = sanitizeBashEnvironment({
 		OPENCODE_API_KEY: "secret",
 		AWS_BEARER_TOKEN_BEDROCK: "secret2",
+		FIFTYX_API_KEY: "secret3",
 		PATH: "/usr/bin",
 		HOME: "/home/user",
-	});
+	}, ["FIFTYX_API_KEY"]);
 	assert.equal(env.OPENCODE_API_KEY, undefined);
 	assert.equal(env.AWS_BEARER_TOKEN_BEDROCK, undefined);
+	assert.equal(env.FIFTYX_API_KEY, undefined);
 	assert.equal(env.PATH, "/usr/bin");
 	assert.equal(env.HOME, "/home/user");
+});
+
+test("wildcard rules match whole commands and bare trailing stars", () => {
+	assert.equal(wildcardMatch("git push *", "git push --force"), true);
+	assert.equal(wildcardMatch("git push *", "git push"), true);
+	assert.equal(wildcardMatch("git push *", "git pushx"), false);
+	assert.equal(wildcardMatch("git * main", "git push main"), true);
+	assert.equal(wildcardMatch("*.env", "cat .env"), true);
+	assert.equal(wildcardMatch("cat ?.env", "cat a.env"), true);
+	assert.equal(wildcardMatch("cat ?.env", "cat ab.env"), false);
+});
+
+test("permission rules use last-match-wins and keep built-in denies", () => {
+	const allowAll = [{ resource: "*", effect: "allow" as const }];
+	assert.equal(decideShellPermission(allowAll, "cat .env").decision, "deny");
+	assert.equal(decideShellPermission(allowAll, "cat ~/.config/io/auth.json").decision, "deny");
+
+	const rules = [
+		{ resource: "git push *", effect: "deny" as const },
+		{ resource: "git push *", effect: "allow" as const },
+	];
+	assert.equal(decideShellPermission(rules, "git push --force").decision, "allow");
+
+	const reversed = [...rules].reverse();
+	assert.equal(decideShellPermission(reversed, "git push --force").decision, "deny");
+	assert.equal(decideShellPermission([{ resource: "npm *", effect: "ask" }], "npm install").decision, "ask");
+});
+
+test("allow rules can pre-approve otherwise dangerous commands", () => {
+	assert.equal(decideShellPermission([], "rm -rf build").decision, "ask");
+	assert.equal(
+		decideShellPermission([{ resource: "rm -rf build", effect: "allow" }], "rm -rf build").decision,
+		"allow",
+	);
+	assert.equal(decideShellPermission([{ resource: "rm -rf build", effect: "allow" }], "rm -rf /").decision, "ask");
+	assert.equal(shellPatternFor("git push --force origin main"), "git push --force origin main");
+	assert.equal(shellPatternFor("git status --short"), "git status *");
+	assert.equal(shellPatternFor("rm -rf build"), "rm -rf build");
 });

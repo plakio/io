@@ -1,4 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import {
 	createAgentSession,
 	createBashToolDefinition,
@@ -10,8 +13,10 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { IoPaths, ThinkingLevel } from "./config.js";
+import { loadConfig } from "./config.js";
 import { DEFAULT_AGENTS, getAgent, canDelegate, type AgentCatalog, type AgentDefinition } from "./agents.js";
-import { assessCommand, sanitizeBashEnvironment } from "./safety.js";
+import { decideShellPermission, sanitizeBashEnvironment } from "./safety.js";
+import { readProviderEnvNames } from "./runtime.js";
 import { buildIoSystemPrompt } from "./system-prompt.js";
 import { createSubagentTool } from "./subagent-tool.js";
 import { VERSION } from "./version.js";
@@ -110,6 +115,8 @@ export interface HarnessOptions {
 	tools?: ToolDefinition[];
 	agent?: AgentDefinition;
 	agentCatalog?: AgentCatalog;
+	/** Project context. Omitted fields are disabled; `main.ts` resolves config defaults. */
+	context?: { skills?: boolean; contextFiles?: boolean };
 }
 
 export interface Harness {
@@ -121,6 +128,8 @@ export interface Harness {
 	modelFallbackMessage?: string;
 	agent: AgentDefinition;
 	agentCatalog: AgentCatalog;
+	/** Resolved context flags, preserved when the harness is replaced (/new, /resume, /fork). */
+	context: { skills: boolean; contextFiles: boolean };
 }
 
 export interface ReplaceHarnessOptions {
@@ -161,9 +170,28 @@ export async function replaceHarnessSession(
 		continueSession: options.continueSession,
 		sessionId: options.sessionId,
 		agentCatalog: current.agentCatalog,
+		context: current.context,
 	});
 
 	return { harness, model, thinkingLevel };
+}
+
+function discoverSkillDirectories(cwd: string): string[] {
+	const candidates = [join(homedir(), ".agents", "skills")];
+	// Walk up so running from a subdirectory still finds the repo's skills.
+	let current = cwd;
+	while (true) {
+		candidates.push(join(current, ".agents", "skills"));
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	const seen = new Set<string>();
+	return candidates.filter((directory) => {
+		if (seen.has(directory)) return false;
+		seen.add(directory);
+		return existsSync(directory);
+	});
 }
 
 export async function createHarness(options: HarnessOptions): Promise<Harness> {
@@ -184,23 +212,30 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 	const hadExistingMessages = resolved.manager.buildSessionContext().messages.length > 0;
 
 	const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
+	const contextOptions = options.context ?? {};
+	const skills = contextOptions.skills === true;
+	const contextFiles = contextOptions.contextFiles === true;
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.cwd,
 		agentDir: options.paths.dataDir,
 		settingsManager,
 		noExtensions: true,
+		// Pi's defaults only look at `.pi/skills`; io loads the user's Claude-style
+		// `~/.agents/skills` and the project's `.agents/skills` instead.
 		noSkills: true,
+		additionalSkillPaths: skills ? discoverSkillDirectories(options.cwd) : undefined,
 		noPromptTemplates: true,
 		noThemes: true,
-		noContextFiles: true,
+		noContextFiles: !contextFiles,
 		systemPrompt: options.systemPrompt ?? buildIoSystemPrompt(),
 	});
 	await resourceLoader.reload();
 
+	const providerEnvNames = readProviderEnvNames(options.paths.modelsPath);
 	const bashTool = createBashToolDefinition(options.cwd, {
 		spawnHook: (context) => ({
 			...context,
-			env: sanitizeBashEnvironment(context.env),
+			env: sanitizeBashEnvironment(context.env, providerEnvNames),
 		}),
 	});
 
@@ -246,10 +281,19 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		if (context.toolCall.name !== "bash") return undefined;
 		const command = (context.args as { command?: unknown }).command;
 		if (typeof command !== "string") return undefined;
-		const risk = assessCommand(command);
-		if (!risk.dangerous) return undefined;
+		// Read permissions fresh from disk on every check, so an "allow always"
+		// saved by the TUI (or an external edit) applies to THIS session now.
+		const rules = loadConfig(options.paths).config.permissions ?? [];
+		const decision = decideShellPermission(rules, command);
+		if (decision.decision === "deny") {
+			return {
+				block: true,
+				reason: `Blocked by io permissions (${decision.reason ?? "deny rule"}): ${command}`,
+			};
+		}
+		if (decision.decision === "allow") return undefined;
 		const allowed = confirmCommand
-			? await confirmCommand({ command, reason: risk.reason ?? "destructive command", signal })
+			? await confirmCommand({ command, reason: decision.reason ?? "destructive command", signal })
 			: false;
 		if (!allowed || signal?.aborted) {
 			return {
@@ -269,5 +313,6 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		modelFallbackMessage: created.modelFallbackMessage,
 		agent,
 		agentCatalog: catalog,
+		context: { skills, contextFiles },
 	};
 }

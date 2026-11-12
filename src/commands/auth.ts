@@ -1,39 +1,48 @@
 import type { AuthEvent, AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig, type IoPaths } from "../config.js";
 import { CliError } from "../errors.js";
-import {
-	SUPPORTED_PROVIDERS,
-	getSupportedProvider,
-	isSupportedProvider,
-	modelReference,
-	providerIds,
-	providerName,
-} from "../providers.js";
+import { getSupportedProvider, isSupportedProvider, modelReference } from "../providers.js";
 import {
 	authStoragePath,
 	createIoModelRuntime,
 	getOrCreateDeviceId,
 	getProviderStatuses,
+	knownProviderIds,
+	knownProviderOrThrow,
 	loadAvailableModels,
 	loginProvider,
 	logoutProvider,
-	supportedProviderOrThrow,
+	providerDisplayName,
+	type ProviderStatus,
 } from "../runtime.js";
 import { LinePrompter, PromptCancelled, type SelectOption } from "../term-prompt.js";
 
-function providerOptions(): SelectOption[] {
-	return SUPPORTED_PROVIDERS.map((provider) => ({
-		id: provider.id,
-		label: provider.name,
-		description: `${provider.auth === "oauth" ? "ChatGPT OAuth" : "API key"} · ${provider.id}`,
-	}));
+function providerOptions(statuses: readonly ProviderStatus[]): SelectOption[] {
+	return statuses.map((status) => {
+		const builtIn = getSupportedProvider(status.id);
+		const auth = builtIn
+			? builtIn.auth === "oauth"
+				? "ChatGPT OAuth"
+				: "API key"
+			: "models.json";
+		const state = status.configured
+			? `${status.source ?? "configured"} · ${status.modelCount} model${status.modelCount === 1 ? "" : "s"}`
+			: "not configured";
+		return { id: status.id, label: status.name, description: `${auth} · ${state}` };
+	});
 }
 
-async function chooseProvider(provider: string | undefined, action: string): Promise<string> {
-	if (provider) return supportedProviderOrThrow(provider);
+async function chooseProvider(
+	runtime: ModelRuntime,
+	provider: string | undefined,
+	action: string,
+	statuses: readonly ProviderStatus[],
+): Promise<string> {
+	if (provider) return knownProviderOrThrow(runtime, provider);
 	const prompter = new LinePrompter();
 	try {
-		return await prompter.select(`Select a provider to ${action}:`, providerOptions());
+		return await prompter.select(`Select a provider to ${action}:`, providerOptions(statuses));
 	} finally {
 		prompter.close();
 	}
@@ -100,19 +109,25 @@ function createInteraction(prompter: LinePrompter, controller: AbortController):
 }
 
 export async function runAuthLogin(paths: IoPaths, providerArg?: string): Promise<void> {
-	const providerId = await chooseProvider(providerArg, "authenticate");
-	const provider = getSupportedProvider(providerId);
-	if (!provider) throw new CliError(`Unknown provider "${providerId}".`);
-
 	const runtime = await createIoModelRuntime(paths);
+	const statuses = await getProviderStatuses(runtime);
+	const providerId = await chooseProvider(runtime, providerArg, "authenticate", statuses);
+	const builtIn = getSupportedProvider(providerId);
+	const name = statuses.find((status) => status.id === providerId)?.name ?? providerDisplayName(runtime, providerId);
+
 	const prompter = new LinePrompter();
 	const controller = new AbortController();
 	const interaction = createInteraction(prompter, controller);
 
-	process.stdout.write(`Authenticating with ${provider.name} (${provider.id})...\n`);
+	process.stdout.write(`Authenticating with ${name} (${providerId})...\n`);
 	if (providerId === "amazon-bedrock") {
 		process.stdout.write(
 			"Bedrock uses a bearer token or AWS credentials. For Kimi K3 (Global) enter your bearer token.\n",
+		);
+	}
+	if (!builtIn) {
+		process.stdout.write(
+			`${name} is defined in models.json. The API key is stored in io's credential file and takes precedence over the key configured there.\n`,
 		);
 	}
 	try {
@@ -132,7 +147,7 @@ export async function runAuthLogin(paths: IoPaths, providerArg?: string): Promis
 	const available = await loadAvailableModels(runtime, providerId);
 	const configState = loadConfig(paths);
 	const config = configState.config;
-	if (!config.provider || !isSupportedProvider(config.provider)) {
+	if (!config.provider || !knownProviderIds(runtime).includes(config.provider)) {
 		config.provider = providerId;
 		delete config.model;
 	}
@@ -150,7 +165,7 @@ export async function runAuthLogin(paths: IoPaths, providerArg?: string): Promis
 		process.stderr.write(`io: could not save model preference: ${(error as Error).message}\n`);
 	}
 
-	process.stdout.write(`\nSaved credentials for ${provider.name} in ${authStoragePath(paths)}.\n`);
+	process.stdout.write(`\nSaved credentials for ${name} in ${authStoragePath(paths)}.\n`);
 	if (available.models.length > 0) {
 		const current = available.models.find((model) => model.provider === config.provider && model.id === config.model);
 		if (current) {
@@ -187,7 +202,7 @@ export async function runAuthLogout(paths: IoPaths, providerArg?: string): Promi
 		}
 	}
 	if (!providerId) throw new CliError("No provider selected.");
-	providerId = supportedProviderOrThrow(providerId);
+	providerId = knownProviderOrThrow(runtime, providerId);
 	await logoutProvider(runtime, providerId);
 
 	const state = loadConfig(paths);
@@ -196,7 +211,7 @@ export async function runAuthLogout(paths: IoPaths, providerArg?: string): Promi
 		delete state.config.model;
 		saveConfig(paths, state.config);
 	}
-	process.stdout.write(`Removed stored credentials for ${providerName(providerId)}.\n`);
+	process.stdout.write(`Removed stored credentials for ${providerDisplayName(runtime, providerId)}.\n`);
 }
 
 export async function runAuthStatus(paths: IoPaths): Promise<void> {
@@ -214,5 +229,8 @@ export async function runAuthStatus(paths: IoPaths): Promise<void> {
 		process.stdout.write(`${name}  configured · ${source} · ${models}\n`);
 	}
 	process.stdout.write(`\nCredentials: ${authStoragePath(paths)}\n`);
-	process.stdout.write(`Providers:   ${providerIds().join(", ")}\n`);
+	process.stdout.write(`Providers:   ${statuses.map((status) => status.id).join(", ")}\n`);
+	if (statuses.some((status) => !isSupportedProvider(status.id))) {
+		process.stdout.write(`models.json: ${paths.modelsPath}\n`);
+	}
 }

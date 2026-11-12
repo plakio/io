@@ -74,3 +74,32 @@ test("invalid arguments report errors", () => {
 	assert.match(parseArgs(["config", "set", "provider"]).error ?? "", /usage: io config set/);
 	assert.match(parseArgs(["models", "a", "b"]).error ?? "", /unexpected argument/);
 });
+
+test("run accepts a prompt and session options", () => {
+	assert.deepEqual(parseArgs(["run", "explain", "this", "repo"]).command, {
+		kind: "run",
+		continueSession: false,
+		prompt: "explain this repo",
+	});
+	assert.deepEqual(parseArgs(["run", "-c", "continue it"]).command, {
+		kind: "run",
+		continueSession: true,
+		prompt: "continue it",
+	});
+	assert.deepEqual(
+		parseArgs(["run", "--session", "01ABC", "-m", "opencode-go/glm-5.3", "--provider", "opencode-go"]).command,
+		{
+			kind: "run",
+			continueSession: false,
+			sessionId: "01ABC",
+			modelRef: "opencode-go/glm-5.3",
+			provider: "opencode-go",
+		},
+	);
+});
+
+test("run rejects conflicting or unknown options", () => {
+	assert.match(parseArgs(["run", "--wat", "hello"]).error ?? "", /unknown option/);
+	assert.match(parseArgs(["run", "--session"]).error ?? "", /requires a value/);
+	assert.match(parseArgs(["run", "-c", "--session", "x"]).error ?? "", /cannot be used together/);
+});

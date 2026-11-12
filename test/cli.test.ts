@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -24,7 +24,7 @@ function run(args: string[], env: NodeJS.ProcessEnv = {}): { status: number | nu
 	return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function tempEnv(): { env: NodeJS.ProcessEnv; cleanup: () => void } {
+function tempEnv(): { env: NodeJS.ProcessEnv; dir: string; cleanup: () => void } {
 	const dir = mkdtempSync(join(tmpdir(), "io-cli-"));
 	return {
 		env: {
@@ -32,6 +32,7 @@ function tempEnv(): { env: NodeJS.ProcessEnv; cleanup: () => void } {
 			IO_DATA_DIR: join(dir, "data"),
 			PI_OFFLINE: "1",
 		},
+		dir,
 		cleanup: () => rmSync(dir, { recursive: true, force: true }),
 	};
 }
@@ -125,6 +126,107 @@ test("invalid config keys are rejected", () => {
 		const result = run(["config", "set", "nonsense", "value"], env);
 		assert.equal(result.status, 1);
 		assert.match(result.stderr, /Unknown config key/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("config set toggles skills and context files", () => {
+	const { env, cleanup } = tempEnv();
+	try {
+		assert.equal(run(["config", "set", "skills", "off"], env).status, 0);
+		assert.equal(run(["config", "set", "contextFiles", "off"], env).status, 0);
+		const show = run(["config", "show"], env);
+		assert.match(show.stdout, /skills\s+off/);
+		assert.match(show.stdout, /context\s+off/);
+		const invalid = run(["config", "set", "skills", "maybe"], env);
+		assert.equal(invalid.status, 1);
+		assert.match(invalid.stderr, /Use on or off/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("models.json OpenAI-compatible providers work with auth, models, and config", () => {
+	const { env, dir, cleanup } = tempEnv();
+	try {
+		const dataDir = join(dir, "data");
+		mkdirSync(dataDir, { recursive: true });
+		writeFileSync(
+			join(dataDir, "models.json"),
+			`${JSON.stringify({
+				providers: {
+					"50x": {
+						name: "50x",
+						baseUrl: "https://api.ai.50x.energy/v1",
+						api: "openai-completions",
+						apiKey: "$FIFTYX_API_KEY",
+						models: [
+							{
+								id: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+								name: "DeepSeek V4.1 Flash 1017",
+								reasoning: true,
+							},
+						],
+					},
+				},
+			}, null, 2)}\n`,
+		);
+
+		const status = run(["auth", "status"], { ...env, FIFTYX_API_KEY: "test-key" });
+		assert.equal(status.status, 0);
+		assert.match(status.stdout, /50x\s+configured/);
+		assert.match(status.stdout, /Providers:\s+.*50x/);
+
+		const models = run(["models", "50x"], { ...env, FIFTYX_API_KEY: "test-key" });
+		assert.equal(models.status, 0);
+		assert.match(models.stdout, /50x \(50x\)/);
+		assert.match(models.stdout, /DeepSeek-V4\.1-Flash-1017/);
+
+		const set = run(
+			["config", "set", "model", "50x/deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+			env,
+		);
+		assert.equal(set.status, 0);
+		const show = run(["config", "show"], env);
+		assert.match(show.stdout, /provider\s+50x/);
+		assert.match(show.stdout, /model\s+deepseek-ai\/DeepSeek-V4\.1-Flash-1017/);
+
+		const setProvider = run(["config", "set", "provider", "50x"], env);
+		assert.equal(setProvider.status, 0);
+
+		const unknown = run(["models", "nope"], env);
+		assert.equal(unknown.status, 1);
+		assert.match(unknown.stderr, /Configured providers: .*50x/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("models.json providers explain a missing api key", () => {
+	const { env, dir, cleanup } = tempEnv();
+	try {
+		const dataDir = join(dir, "data");
+		mkdirSync(dataDir, { recursive: true });
+		writeFileSync(
+			join(dataDir, "models.json"),
+			`${JSON.stringify({
+				providers: {
+					"50x": {
+						baseUrl: "https://api.ai.50x.energy/v1",
+						api: "openai-completions",
+						apiKey: "$FIFTYX_API_KEY",
+						models: [{ id: "deepseek-ai/DeepSeek-V4.1-Flash-1017" }],
+					},
+				},
+			})}\n`,
+		);
+		const cleanEnv = { ...env };
+		delete cleanEnv.FIFTYX_API_KEY;
+		const result = run(["models", "50x"], cleanEnv);
+		assert.equal(result.status, 1);
+		assert.match(result.stderr, /No authenticated models/);
+		assert.match(result.stderr, /models\.json/);
 	} finally {
 		cleanup();
 	}

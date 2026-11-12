@@ -66,6 +66,29 @@ async function run(argv: string[]): Promise<void> {
 			await runAuthStatus(resolvePaths());
 			return;
 		}
+		case "run": {
+			const { runHeadless } = await import("./main.js");
+			try {
+				const code = await runHeadless({
+					prompt: command.prompt,
+					continueSession: command.continueSession,
+					sessionId: command.sessionId,
+					modelRef: command.modelRef,
+					provider: command.provider,
+				});
+				process.exitCode = code;
+			} catch (error) {
+				if (error instanceof CliError) {
+					process.stderr.write(`${error.message}\n`);
+					process.exitCode = error.exitCode;
+				} else {
+					const message = error instanceof Error ? error.message : String(error);
+					process.stderr.write(`io: ${message}\n`);
+					process.exitCode = 1;
+				}
+			}
+			return;
+		}
 		case "models": {
 			const { runModels } = await import("./commands/models.js");
 			await runModels(resolvePaths(), { provider: command.provider, refresh: command.refresh });

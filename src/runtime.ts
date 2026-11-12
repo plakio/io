@@ -8,12 +8,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { ensureIoDirectories, type IoPaths } from "./config.js";
 import {
-	filterSupportedModels,
-	getSupportedProvider,
 	isSupportedProvider,
 	providerIds,
 	providerName,
-	type SupportedProviderId,
 } from "./providers.js";
 
 // The Pi SDK loads OAuth flows through runtime-variable imports so bundlers do
@@ -22,9 +19,60 @@ import {
 // token refresh, or request reaches them.
 registerBunOAuthFlows();
 
+/** Providers explicitly configured in models.json, keyed by runtime instance. */
+const configuredProviders = new WeakMap<ModelRuntime, readonly string[]>();
+
+function readModelsJsonProviders(modelsPath: string): Record<string, unknown> | undefined {
+	try {
+		const raw = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+		const providers = (raw as { providers?: unknown }).providers;
+		if (!providers || typeof providers !== "object" || Array.isArray(providers)) return undefined;
+		return providers as Record<string, unknown>;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Provider IDs declared under `providers` in a models.json file. */
+export function readConfiguredProviderIds(modelsPath: string): string[] {
+	return Object.keys(readModelsJsonProviders(modelsPath) ?? {}).filter((id) => id.length > 0);
+}
+
+const ENV_REFERENCE = /(?<!\$)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+/**
+ * Environment variables referenced by models.json credentials or headers.
+ * These are provider secrets and must not reach the model's shell.
+ */
+export function readProviderEnvNames(modelsPath: string): string[] {
+	const providers = readModelsJsonProviders(modelsPath);
+	if (!providers) return [];
+	const names = new Set<string>();
+	const collect = (value: unknown) => {
+		if (typeof value !== "string") return;
+		for (const match of value.matchAll(ENV_REFERENCE)) {
+			const name = match[1] ?? match[2];
+			if (name) names.add(name);
+		}
+	};
+	for (const provider of Object.values(providers)) {
+		if (!provider || typeof provider !== "object" || Array.isArray(provider)) continue;
+		const entry = provider as Record<string, unknown>;
+		collect(entry.apiKey);
+		if (entry.headers && typeof entry.headers === "object" && !Array.isArray(entry.headers)) {
+			for (const header of Object.values(entry.headers as Record<string, unknown>)) collect(header);
+		}
+	}
+	return [...names];
+}
+
 export interface AvailableModels {
 	models: Model<Api>[];
 	errors: Map<string, Error>;
+	/** Known providers in display order: io's built-ins first, then models.json providers. */
+	providers: string[];
+	providerNames: Map<string, string>;
 }
 
 export type RuntimeFactory = (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
@@ -39,6 +87,7 @@ export async function createIoModelRuntime(
 		modelsPath: paths.modelsPath,
 		refreshOnCreate: false,
 	});
+	configuredProviders.set(runtime, readConfiguredProviderIds(paths.modelsPath));
 	// Replay the persisted catalog overlay written by earlier refreshes, so
 	// models fetched by a previous `io models --refresh` survive across
 	// sessions. Offline only: no network here.
@@ -46,12 +95,49 @@ export async function createIoModelRuntime(
 	return runtime;
 }
 
+function providerCatalog(runtime: ModelRuntime): { ids: string[]; names: Map<string, string> } {
+	const ids: string[] = [];
+	const names = new Map<string, string>();
+	const getProvider = (id: string) =>
+		typeof runtime.getProvider === "function" ? runtime.getProvider(id) : undefined;
+	for (const id of providerIds()) {
+		ids.push(id);
+		names.set(id, getProvider(id)?.name ?? providerName(id));
+	}
+	for (const id of configuredProviders.get(runtime) ?? []) {
+		if (names.has(id)) continue;
+		ids.push(id);
+		names.set(id, getProvider(id)?.name ?? id);
+	}
+	return { ids, names };
+}
+
+/** Providers io can address: built-ins first, then providers declared in models.json. */
+export function knownProviderIds(runtime: ModelRuntime): string[] {
+	return providerCatalog(runtime).ids;
+}
+
+export function providerDisplayName(runtime: ModelRuntime, providerId: string): string {
+	return providerCatalog(runtime).names.get(providerId) ?? providerName(providerId);
+}
+
+export function knownProviderOrThrow(runtime: ModelRuntime, providerId: string): string {
+	const known = knownProviderIds(runtime);
+	if (!known.includes(providerId)) {
+		throw new Error(
+			`Unknown provider "${providerId}". Configured providers: ${known.join(", ")}. Add custom providers in models.json.`,
+		);
+	}
+	return providerId;
+}
+
 export async function loadAvailableModels(
 	runtime: ModelRuntime,
 	provider?: string,
 ): Promise<AvailableModels> {
 	const errors = new Map<string, Error>();
-	const providers: readonly string[] = provider ? [provider] : providerIds();
+	const catalog = providerCatalog(runtime);
+	const providers: readonly string[] = provider ? [provider] : catalog.ids;
 	const results = await Promise.allSettled(
 		providers.map(async (providerId) => ({
 			providerId,
@@ -59,6 +145,8 @@ export async function loadAvailableModels(
 		})),
 	);
 
+	const allowed = new Set(catalog.ids);
+	if (provider) allowed.add(provider);
 	const models: Model<Api>[] = [];
 	for (let index = 0; index < results.length; index++) {
 		const result = results[index];
@@ -68,15 +156,15 @@ export async function loadAvailableModels(
 			errors.set(providers[index] ?? "unknown", reason);
 			continue;
 		}
-		models.push(...filterSupportedModels(result.value.models));
+		models.push(...result.value.models.filter((model) => allowed.has(model.provider)));
 	}
 
-	const ordered = providerIds().flatMap((providerId) => models.filter((model) => model.provider === providerId));
-	return { models: ordered, errors };
+	const ordered = catalog.ids.flatMap((providerId) => models.filter((model) => model.provider === providerId));
+	return { models: ordered, errors, providers: catalog.ids, providerNames: catalog.names };
 }
 
 export interface ProviderStatus {
-	id: SupportedProviderId;
+	id: string;
 	name: string;
 	configured: boolean;
 	source?: string;
@@ -87,15 +175,15 @@ export interface ProviderStatus {
 export async function getProviderStatuses(runtime: ModelRuntime): Promise<ProviderStatus[]> {
 	const available = await loadAvailableModels(runtime);
 	const statuses: ProviderStatus[] = [];
-	for (const provider of providerIds()) {
-		const check = await runtime.checkAuth(provider).catch(() => undefined);
+	for (const providerId of available.providers) {
+		const check = await runtime.checkAuth(providerId).catch(() => undefined);
 		statuses.push({
-			id: provider,
-			name: providerName(provider),
+			id: providerId,
+			name: available.providerNames.get(providerId) ?? providerName(providerId),
 			configured: check !== undefined,
 			source: check?.source,
 			authType: check?.type,
-			modelCount: available.models.filter((model) => model.provider === provider).length,
+			modelCount: available.models.filter((model) => model.provider === providerId).length,
 		});
 	}
 	return statuses;
@@ -107,9 +195,9 @@ export async function loginProvider(
 	interaction: AuthInteraction,
 	options: { getDeviceId?: () => string } = {},
 ): Promise<void> {
-	if (!isSupportedProvider(providerId)) {
+	if (!knownProviderIds(runtime).includes(providerId)) {
 		throw new Error(
-			`Unknown provider "${providerId}". Supported providers: ${providerIds().join(", ")}.`,
+			`Unknown provider "${providerId}". Configured providers: ${knownProviderIds(runtime).join(", ")}.`,
 		);
 	}
 	const provider = runtime.getProvider(providerId);
@@ -125,9 +213,9 @@ export async function loginProvider(
 }
 
 export async function logoutProvider(runtime: ModelRuntime, providerId: string): Promise<void> {
-	if (!isSupportedProvider(providerId)) {
+	if (!knownProviderIds(runtime).includes(providerId)) {
 		throw new Error(
-			`Unknown provider "${providerId}". Supported providers: ${providerIds().join(", ")}.`,
+			`Unknown provider "${providerId}". Configured providers: ${knownProviderIds(runtime).join(", ")}.`,
 		);
 	}
 	await runtime.logout(providerId);
@@ -138,11 +226,24 @@ export async function restoreCatalogs(runtime: ModelRuntime): Promise<void> {
 	await runtime.refresh({ allowNetwork: false }).catch(() => undefined);
 }
 
+/**
+ * Reload models.json and recompose every provider without network access.
+ * Used by `/reload` so newly added custom providers appear in-session.
+ */
+export async function reloadModelsJson(runtime: ModelRuntime, modelsPath: string): Promise<void> {
+	await runtime.refresh({ allowNetwork: false }).catch(() => undefined);
+	configuredProviders.set(runtime, readConfiguredProviderIds(modelsPath));
+}
+
 export async function refreshCatalogs(
 	runtime: ModelRuntime,
 	provider?: string,
 	options: { timeoutMs?: number; force?: boolean } = {},
 ): Promise<{ aborted: boolean; errors: Map<string, Error> }> {
+	// models.json providers are static; there is no catalog endpoint to refresh.
+	if (provider && !isSupportedProvider(provider)) {
+		return { aborted: false, errors: new Map() };
+	}
 	const timeoutMs = options.timeoutMs ?? 15_000;
 	const force = options.force ?? true;
 	const controller = new AbortController();
@@ -181,14 +282,4 @@ export function getOrCreateDeviceId(paths: IoPaths): string {
 
 export function authStoragePath(paths: IoPaths): string {
 	return paths.authPath;
-}
-
-export function supportedProviderOrThrow(providerId: string): SupportedProviderId {
-	const provider = getSupportedProvider(providerId);
-	if (!provider) {
-		throw new Error(
-			`Unknown provider "${providerId}". Supported providers: ${providerIds().join(", ")}.`,
-		);
-	}
-	return provider.id;
 }

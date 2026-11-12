@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
 	loadConfig,
 	parseConfig,
+	resolveContextSettings,
 	resolvePaths,
 	saveConfig,
 	THINKING_LEVELS,
@@ -82,4 +83,34 @@ test("malformed config does not crash and produces a warning", () => {
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("context settings default to enabled and can be disabled", () => {
+	assert.deepEqual(resolveContextSettings({}), { skills: true, contextFiles: true });
+	assert.deepEqual(resolveContextSettings({ skills: false }), { skills: false, contextFiles: true });
+	assert.deepEqual(resolveContextSettings({ contextFiles: false }), { skills: true, contextFiles: false });
+	assert.deepEqual(parseConfig({ skills: false, contextFiles: true }).config, { skills: false, contextFiles: true });
+	assert.deepEqual(parseConfig({ skills: "yes" }).warnings, ["ignoring invalid config value: skills"]);
+});
+
+test("permission rules parse and invalid entries warn", () => {
+	const parsed = parseConfig({
+		permissions: [
+			{ resource: "git push *", effect: "ask" },
+			{ resource: "npm install", effect: "allow" },
+			{ resource: "rm -rf build", effect: "deny" },
+		],
+	});
+	assert.deepEqual(parsed.config.permissions, [
+		{ resource: "git push *", effect: "ask" },
+		{ resource: "npm install", effect: "allow" },
+		{ resource: "rm -rf build", effect: "deny" },
+	]);
+	assert.deepEqual(parsed.warnings, []);
+
+	const invalid = parseConfig({
+		permissions: [{ resource: "ok", effect: "maybe" }, { resource: 3, effect: "allow" }, "nope"],
+	});
+	assert.deepEqual(invalid.config.permissions, undefined);
+	assert.match(invalid.warnings[0] ?? "", /invalid entries in permissions/);
 });

@@ -26,10 +26,11 @@ import type { SlashCommand } from "@earendil-works/pi-tui";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths, ThinkingLevel } from "../config.js";
 import { ensureIoDirectories, loadConfig, saveConfig } from "../config.js";
+import { shellPatternFor } from "../safety.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
 import { modelReference, parseModelReference, providerName } from "../providers.js";
-import { refreshCatalogs, loadAvailableModels } from "../runtime.js";
+import { refreshCatalogs, loadAvailableModels, reloadModelsJson } from "../runtime.js";
 import { GITHUB_REPOSITORY, compareVersions, fetchLatestRelease } from "../update.js";
 import {
 	replaceHarnessSession,
@@ -866,7 +867,7 @@ export class IoApp {
 				return;
 			case "/login":
 				this.addNotice(
-					"Authenticate in a separate terminal:\n\n  io auth login opencode-go\n  io auth login openai-codex\n\nOr export OPENCODE_API_KEY. Then restart io if the model list changes.",
+					`Authenticate in a separate terminal:\n\n  io auth login opencode-go\n  io auth login openai-codex\n\nOr export OPENCODE_API_KEY. OpenAI-compatible providers are configured in ${this.options.paths.modelsPath}. Then restart io if the model list changes.`,
 					{ dim: true },
 				);
 				return;
@@ -1652,6 +1653,7 @@ export class IoApp {
 			this.config = reloaded.config;
 			await this.session.reload();
 			this.updateAgentAutocomplete();
+			await reloadModelsJson(this.options.runtime, this.options.paths.modelsPath);
 			const refreshed = await refreshCatalogs(this.options.runtime, undefined, { force: true });
 			if (refreshed.errors.size > 0) {
 				const details = [...refreshed.errors.entries()]
@@ -1798,9 +1800,32 @@ export class IoApp {
 			};
 			const onAbort = () => finish(false);
 			signal?.addEventListener("abort", onAbort, { once: true });
-			const overlay = new ConfirmOverlay(command, reason, finish, () => {
-				void this.cancelGeneration();
-			});
+			const overlay = new ConfirmOverlay(
+				command,
+				reason,
+				finish,
+				() => {
+					void this.cancelGeneration();
+				},
+				() => {
+					// Persist the "allow always" answer as a permissions rule NOW, so
+					// the `beforeToolCall` hook applies it to the next tool call in THIS
+					// session (the hook re-reads the file on every check).
+					try {
+						const pattern = shellPatternFor(command);
+						this.config = {
+							...this.config,
+							permissions: [...(this.config.permissions ?? []), { resource: pattern, effect: "allow" }],
+						};
+						saveConfig(this.options.paths, this.config);
+						this.addNotice(`saved allow rule: ${pattern}`, { dim: true });
+					} catch (error) {
+						this.addNotice(`warning: could not save permission rule: ${(error as Error).message}`, {
+							bold: true,
+						});
+					}
+				},
+			);
 			this.awaitingConfirm = true;
 			this.activeOverlay = this.tui.showOverlay(new PaddedBox(overlay), {
 				anchor: "center",

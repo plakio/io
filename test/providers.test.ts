@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
-	filterSupportedModels,
 	modelReference,
 	parseModelReference,
 	selectModel,
@@ -81,8 +80,33 @@ test("no models produces an authentication error", () => {
 	if (!result.ok) assert.match(result.error, /No models are available/);
 });
 
-test("unsupported providers are filtered", () => {
-	const filtered = filterSupportedModels([...models, model("anthropic", "claude")]);
-	assert.equal(filtered.length, 3);
-	assert.ok(filtered.every((entry) => entry.provider !== "anthropic"));
+test("models.json providers are selectable when known", () => {
+	const custom = [...models, model("50x", "deepseek-ai/DeepSeek-V4.1-Flash-1017")];
+
+	const byProvider = selectModel(custom, {}, { provider: "50x", knownProviders: ["50x"] });
+	assert.equal(byProvider.ok, true);
+	if (byProvider.ok) {
+		assert.equal(byProvider.selection.model.provider, "50x");
+		assert.equal(byProvider.selection.model.id, "deepseek-ai/DeepSeek-V4.1-Flash-1017");
+	}
+
+	const byReference = selectModel(custom, {}, {
+		modelRef: "50x/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+		knownProviders: ["50x"],
+	});
+	assert.equal(byReference.ok, true);
+	if (byReference.ok) assert.equal(byReference.selection.model.provider, "50x");
+
+	const asPreference = selectModel(custom, {
+		provider: "50x",
+		model: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+	}, { knownProviders: ["50x"] });
+	assert.equal(asPreference.ok, true);
+	if (asPreference.ok) assert.equal(asPreference.selection.model.provider, "50x");
+});
+
+test("unknown providers list the configured models.json providers", () => {
+	const result = selectModel(models, {}, { provider: "anthropic", knownProviders: ["50x"] });
+	assert.equal(result.ok, false);
+	if (!result.ok) assert.match(result.error, /Configured providers: .*50x/);
 });

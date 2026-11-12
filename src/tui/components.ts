@@ -1062,6 +1062,7 @@ export class ConfirmOverlay implements Component {
 	private readonly reason: string;
 	private readonly done: (allowed: boolean) => void;
 	private readonly cancelGeneration: (() => void) | undefined;
+	private readonly rememberAllow: (() => void) | undefined;
 	private finished = false;
 
 	constructor(
@@ -1069,11 +1070,13 @@ export class ConfirmOverlay implements Component {
 		reason: string,
 		done: (allowed: boolean) => void,
 		cancelGeneration?: () => void,
+		rememberAllow?: () => void,
 	) {
 		this.command = sanitizeOutput(command);
 		this.reason = sanitizeOutput(reason);
 		this.done = done;
 		this.cancelGeneration = cancelGeneration;
+		this.rememberAllow = rememberAllow;
 	}
 
 	invalidate(): void {}
@@ -1082,6 +1085,12 @@ export class ConfirmOverlay implements Component {
 		if (this.finished) return;
 		if (data === "y" || data === "Y") {
 			this.finished = true;
+			this.done(true);
+			return;
+		}
+		if ((data === "a" || data === "A") && this.rememberAllow) {
+			this.finished = true;
+			this.rememberAllow();
 			this.done(true);
 			return;
 		}
@@ -1109,7 +1118,11 @@ export class ConfirmOverlay implements Component {
 		lines.push("");
 		lines.push(truncateToWidth(style.dim(`Reason: ${this.reason}`), width, "…"));
 		lines.push("");
-		lines.push(truncateToWidth(style.dim("[y] allow    [n] deny"), width, "…"));
+		if (this.rememberAllow) {
+			lines.push(truncateToWidth(style.dim("[y] allow once   [a] always   [n] deny"), width, "…"));
+		} else {
+			lines.push(truncateToWidth(style.dim("[y] allow    [n] deny"), width, "…"));
+		}
 		lines.push(new DynamicBorder().render(width)[0] ?? "");
 		return lines;
 	}

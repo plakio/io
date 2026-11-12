@@ -15,6 +15,14 @@ export type Command =
 	| { kind: "auth-status" }
 	| { kind: "models"; provider?: string; refresh: boolean }
 	| { kind: "sessions" }
+	| {
+			kind: "run";
+			prompt?: string;
+			continueSession: boolean;
+			sessionId?: string;
+			modelRef?: string;
+			provider?: string;
+	  }
 	| { kind: "config-show" }
 	| { kind: "config-interactive" }
 	| { kind: "config-set"; key: string; value: string };
@@ -25,6 +33,7 @@ export const HELP_TEXT = `${APP_NAME} ${APP_TAGLINE}
 
 Usage:
   io                          Start an interactive session
+  io run [prompt...]          Run a prompt non-interactively
   io auth login [provider]    Authenticate with a provider
   io auth logout [provider]   Remove stored credentials
   io auth status              Show authentication status
@@ -33,7 +42,7 @@ Usage:
   io config                   Show or edit configuration interactively
   io config show              Show configuration
   io config edit              Interactive configuration
-  io config set <key> <value> Set provider, model, or thinking level
+  io config set <key> <value> Set provider, model, thinking, or context options
 
 Options:
   -c, --continue              Continue the most recent session here
@@ -65,6 +74,60 @@ function takeValue(args: string[], index: number, flag: string): { value?: strin
 		return { error: `${flag} requires a value` };
 	}
 	return { value };
+}
+
+function parseRunArgs(args: string[]): { command?: Extract<Command, { kind: "run" }>; error?: string } {
+	let continueSession = false;
+	let sessionId: string | undefined;
+	let modelRef: string | undefined;
+	let provider: string | undefined;
+	const promptParts: string[] = [];
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === undefined) continue;
+		if (arg === "--continue" || arg === "-c") {
+			continueSession = true;
+			continue;
+		}
+		if (arg === "--session") {
+			const result = takeValue(args, index, "--session");
+			if (result.error) return { error: result.error };
+			sessionId = result.value;
+			index++;
+			continue;
+		}
+		if (arg === "--model" || arg === "-m") {
+			const result = takeValue(args, index, arg);
+			if (result.error) return { error: result.error };
+			modelRef = result.value;
+			index++;
+			continue;
+		}
+		if (arg === "--provider") {
+			const result = takeValue(args, index, "--provider");
+			if (result.error) return { error: result.error };
+			provider = result.value;
+			index++;
+			continue;
+		}
+		if (arg.startsWith("-")) {
+			return { error: `unknown option: ${arg} (io run takes -c, --session, -m, --model, --provider, and a prompt)` };
+		}
+		promptParts.push(arg);
+	}
+
+	if (continueSession && sessionId !== undefined) {
+		return { error: "--continue and --session cannot be used together" };
+	}
+
+	const command: Extract<Command, { kind: "run" }> = { kind: "run", continueSession };
+	const prompt = promptParts.join(" ").trim();
+	if (prompt.length > 0) command.prompt = prompt;
+	if (sessionId !== undefined) command.sessionId = sessionId;
+	if (modelRef !== undefined) command.modelRef = modelRef;
+	if (provider !== undefined) command.provider = provider;
+	return { command };
 }
 
 export function parseArgs(args: string[]): ParseResult {
@@ -117,6 +180,13 @@ export function parseArgs(args: string[]): ParseResult {
 				return { error: `unexpected argument: ${args[1] ?? ""}` };
 			}
 			return { command: { kind: "sessions" } };
+		case "run": {
+			const parsed = parseRunArgs(args.slice(1));
+			if (parsed.error) return { error: parsed.error };
+			const runCommand = parsed.command;
+			if (!runCommand) return { error: "invalid io run arguments" };
+			return { command: runCommand };
+		}
 		case "config": {
 			const subcommand = args[1];
 			if (subcommand === "show") {

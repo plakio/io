@@ -1,11 +1,44 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { listSessions } from "../src/session.js";
-import { createFauxHarness, textEvents, toolResultText } from "./helpers.js";
+import { createFauxHarness, temporaryPaths, textEvents, toolResultText } from "./helpers.js";
+
+test("context files and project skills load only when enabled", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "io-context-"));
+	mkdirSync(join(cwd, ".agents", "skills", "demo"), { recursive: true });
+	writeFileSync(join(cwd, "AGENTS.md"), "PROJECT-CONTEXT-MARKER\n");
+	writeFileSync(
+		join(cwd, ".agents", "skills", "demo", "SKILL.md"),
+		"---\nname: demo-skill\ndescription: Demo skill marker\n---\n\n# Demo\n",
+	);
+	try {
+		const off = await createFauxHarness({ cwd });
+		try {
+			assert.doesNotMatch(off.harness.session.systemPrompt, /PROJECT-CONTEXT-MARKER/);
+			assert.doesNotMatch(off.harness.session.systemPrompt, /demo-skill/);
+		} finally {
+			off.harness.session.dispose();
+			off.cleanup();
+		}
+
+		const on = await createFauxHarness({ cwd, context: { skills: true, contextFiles: true } });
+		try {
+			assert.match(on.harness.session.systemPrompt, /PROJECT-CONTEXT-MARKER/);
+			assert.match(on.harness.session.systemPrompt, /demo-skill/);
+			assert.match(on.harness.session.systemPrompt, /Demo skill marker/);
+			assert.deepEqual(on.harness.context, { skills: true, contextFiles: true });
+		} finally {
+			on.harness.session.dispose();
+			on.cleanup();
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 test("a prompt streams text through the Pi session", async () => {
 	const harness = await createFauxHarness();
@@ -14,6 +47,12 @@ test("a prompt streams text through the Pi session", async () => {
 		harness.faux.setResponses([fauxAssistantMessage("hello from the faux provider")]);
 		assert.match(harness.harness.session.systemPrompt, /You are IO/);
 		assert.doesNotMatch(harness.harness.session.systemPrompt, /Pi documentation/);
+		// Auto-compaction is a Pi session feature; io relies on its defaults.
+		assert.equal(harness.harness.settingsManager.getCompactionEnabled(), true);
+		assert.equal(
+			harness.harness.settingsManager.getCompactionSettings(harness.harness.session.model).enabled,
+			true,
+		);
 		await harness.harness.session.prompt("say hello");
 		events.unsubscribe();
 		assert.deepEqual(harness.harness.session.getActiveToolNames(), ["bash"]);
@@ -93,6 +132,42 @@ test("provider API keys are not inherited by bash commands", async () => {
 		else process.env.OPENCODE_API_KEY = previous;
 		harness.harness.session.dispose();
 		harness.cleanup();
+	}
+});
+
+test("models.json credential environment variables are not inherited by bash commands", async () => {
+	const previous = process.env.FIFTYX_API_KEY;
+	process.env.FIFTYX_API_KEY = "50x-test-secret";
+	const temporary = temporaryPaths("io-custom-provider-");
+	writeFileSync(
+		join(temporary.paths.dataDir, "models.json"),
+		`${JSON.stringify({
+			providers: {
+				"50x": {
+					baseUrl: "https://example.invalid/v1",
+					api: "openai-completions",
+					apiKey: "$FIFTYX_API_KEY",
+					models: [{ id: "test-model" }],
+				},
+			},
+		})}\n`,
+	);
+	const harness = await createFauxHarness({ paths: temporary.paths });
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "env | grep '^FIFTYX_API_KEY=' || echo NOT-PRESENT" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("checked"),
+		]);
+		await harness.harness.session.prompt("check the environment");
+		assert.match(toolResultText(harness.harness), /NOT-PRESENT/);
+		assert.doesNotMatch(toolResultText(harness.harness), /50x-test-secret/);
+	} finally {
+		if (previous === undefined) delete process.env.FIFTYX_API_KEY;
+		else process.env.FIFTYX_API_KEY = previous;
+		harness.harness.session.dispose();
+		temporary.cleanup();
 	}
 });
 

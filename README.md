@@ -17,8 +17,13 @@ There is no MCP integration, plugin marketplace, subagent system, browser automa
 - One agent tool: Bash.
 - Streaming terminal output with clear command/tool separation.
 - OpenCode Go API-key authentication and OpenAI Codex OAuth through the Pi SDK.
+- Custom OpenAI-compatible endpoints through `models.json`.
 - Model discovery from the SDK catalog, with `/model` switching in-session.
 - Persistent provider/model preferences and resumable sessions.
+- Headless runs with `io run` for scripts, pipes, and automation.
+- Project context from `AGENTS.md` and skills from `~/.agents/skills`.
+- Automatic context compaction before the model window fills.
+- Configurable shell permissions, plus per-command confirmation in the TUI.
 - Multiline input and large pastes shown as editable text, never `[pasted text]`.
 - Input tokens, output tokens, context usage, and generation speed from actual SDK/provider data.
 - Git change inspection with `/diff`.
@@ -73,6 +78,67 @@ io auth login amazon-bedrock
 io config set model amazon-bedrock/global.moonshotai.kimi-k3
 ```
 
+### OpenAI-compatible providers
+
+Endpoints that speak the OpenAI Chat Completions API can be added in
+`~/.local/share/io/models.json` (or `$XDG_DATA_HOME/io/models.json`). This is
+the Pi SDK `models.json` format; io loads it at startup and on `/reload`, and
+lists its providers after the built-in ones.
+
+```json
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "50x": {
+      "name": "50x",
+      "baseUrl": "https://api.ai.50x.energy/v1",
+      "api": "openai-completions",
+      "apiKey": "$FIFTYX_API_KEY",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+          "name": "DeepSeek V4.1 Flash 1017",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+`thinkingLevelMap` translates io's thinking levels to provider values. The 50x
+endpoint accepts `low`, `high`, `xhigh`, and `max`; without the map Pi's
+default `medium` is rejected. Omit the map if the endpoint accepts the
+standard OpenAI `reasoning_effort` values.
+
+`apiKey` accepts a literal value, `$NAME`/`${NAME}` environment interpolation,
+or `!command`. Other supported APIs include `openai-responses`,
+`anthropic-messages`, and `google-generative-ai`; omit `api` only when the
+provider defines it per model. Prefer environment interpolation over a literal
+key: `models.json` itself is readable by the agent's shell, while referenced
+environment variables are stripped from Bash commands. The provider ID becomes
+the model namespace:
+
+```bash
+export FIFTYX_API_KEY=...
+io models 50x
+io config set model 50x/deepseek-ai/DeepSeek-V4.1-Flash-1017
+io run -m 50x/deepseek-ai/DeepSeek-V4.1-Flash-1017 "summarize this repo"
+```
+
+`io auth login 50x` also stores a key in io's credential file for a
+`models.json` provider. Custom provider catalogs are static, so
+`io models --refresh 50x` has nothing to fetch.
+
 Check status and remove credentials:
 
 ```bash
@@ -108,6 +174,34 @@ io
 ```
 
 Start in the current working directory. On first use, authenticate with a provider.
+
+### Headless
+
+```bash
+io run "summarize this repository"     # print the answer and exit
+io run --continue "what changed?"      # continue the latest session
+io run --session <id-prefix> "..."     # continue a specific session
+io run -m opencode-go/glm-5.3 "..."    # override the model for this run
+echo "explain this error" | io run     # read the prompt from stdin
+```
+
+Headless runs write assistant text to stdout. Commands that need confirmation are denied because there is no TUI; add a `permissions` allow rule to pre-approve a command for automation.
+
+### Project context
+
+IO loads context automatically in both interactive and headless runs:
+
+- `AGENTS.md` (or `AGENTS.override.md`, `CLAUDE.md`) from the working directory and its ancestors, including `~/AGENTS.md`.
+- Skills from `~/.agents/skills` and `<project>/.agents/skills`.
+
+Disable either source with:
+
+```bash
+io config set contextFiles off
+io config set skills off
+```
+
+Sessions compact their context automatically before the model window fills. Use `/compact` to force it.
 
 ### Keys
 
@@ -156,16 +250,33 @@ io config edit             # interactive provider, model, and thinking selection
 io config set provider opencode-go
 io config set model opencode-go/deepseek-v4.1-flash
 io config set thinking high
+io config set skills off
+io config set contextFiles off
 ```
 
 `io models` and `io sessions` are also interactive in a terminal: `io models` can set the default model, and `io sessions` can resume a selected session. Both remain non-interactive when their output is piped.
 
 Configuration lives in `~/.config/io/config.json`. Credentials are never stored there.
 
+Shell permissions use the opencode rule shape. Rules match the whole command, the last matching rule wins, and built-in denies for credential files (`.env`, `auth.json`) cannot be overridden:
+
+```json
+{
+  "permissions": [
+    { "resource": "git push *", "effect": "allow" },
+    { "resource": "npm publish", "effect": "ask" },
+    { "resource": "rm -rf *", "effect": "deny" }
+  ]
+}
+```
+
+In the confirmation overlay, `a` remembers an allow rule. Dangerous commands are stored exactly (`rm -rf build`), while ordinary commands use their first two tokens (`git status *`).
+
 Environment variables:
 
 - `OPENCODE_API_KEY` — OpenCode Go API key.
 - `AWS_BEARER_TOKEN_BEDROCK` — Amazon Bedrock bearer token.
+- Any environment variable referenced as `$NAME` or `${NAME}` in `models.json` credentials or headers.
 - `XDG_CONFIG_HOME`, `XDG_DATA_HOME` — standard directory overrides.
 - `IO_CONFIG_DIR`, `IO_DATA_DIR` — IO-specific directory overrides (useful for tests).
 
@@ -173,10 +284,12 @@ Environment variables:
 
 - Every command the model runs is displayed in the transcript.
 - A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires explicit `y` confirmation.
+- `permissions` rules can pre-approve or deny commands; built-in denies for `.env` and `auth.json` cannot be overridden.
 - Denied commands are reported to the model and are not executed.
 - Running commands are cancelled through the SDK's abort signal on `Esc` or `Ctrl+C`.
-- `OPENCODE_API_KEY` and `AWS_BEARER_TOKEN_BEDROCK` are removed from the environment inherited by Bash commands.
-- IO does not load Pi extensions, skills, prompt templates, MCP servers, or project context files automatically.
+- `OPENCODE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, and environment variables referenced by `models.json` credentials are removed from the environment inherited by Bash commands.
+- IO loads `AGENTS.md`/`CLAUDE.md` and `.agents/skills` as project context when enabled; disable them with `io config set contextFiles off` and `io config set skills off`.
+- Pi extensions, prompt templates, and MCP servers are not loaded.
 - Provider credentials are never written to logs or committed.
 
 ## Development
@@ -198,8 +311,8 @@ Project layout:
 
 ```text
 src/cli.ts              argument parsing and command dispatch
-src/main.ts             interactive startup
-src/session.ts          Pi AgentSession, Bash tool, confirmations
+src/main.ts             interactive and headless startup
+src/session.ts          Pi AgentSession, Bash tool, permissions, context
 src/providers.ts        supported providers and model selection
 src/runtime.ts          authentication, availability, model catalogs
 src/tui/                terminal application and components
