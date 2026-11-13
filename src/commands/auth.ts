@@ -212,6 +212,11 @@ export async function runAuthLogout(paths: IoPaths, providerArg?: string): Promi
 		saveConfig(paths, state.config);
 	}
 	process.stdout.write(`Removed stored credentials for ${providerDisplayName(runtime, providerId)}.\n`);
+	if (getSupportedProvider(providerId)) {
+		process.stdout.write(
+			`If this provider is also authenticated through an environment variable, unset it in your shell.\n`,
+		);
+	}
 }
 
 export async function runAuthStatus(paths: IoPaths): Promise<void> {

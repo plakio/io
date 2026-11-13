@@ -5,7 +5,6 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { collectImageAttachments } from "../images.js";
 import { formatCwdForFooter } from "../format.js";
-import { getGitBranch } from "../git-diff.js";
 import {
 	CombinedAutocompleteProvider,
 	Container,
@@ -23,34 +22,33 @@ import {
 	type Component,
 	type OverlayHandle,
 	type ProgramStatus,
+	type Terminal,
 } from "@earendil-works/pi-tui";
-import type { SlashCommand } from "@earendil-works/pi-tui";
 import {
 	ModelSelectorComponent,
 	ThinkingSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { AgentSessionEvent, ModelRuntime, SessionStats } from "@earendil-works/pi-coding-agent";
 import type { IoConfig, IoPaths, PermissionMode, ThinkingLevel, Verbosity } from "../config.js";
 import {
 	ensureIoDirectories,
 	loadConfig,
 	PERMISSION_MODES,
-	resolvePermissionMode,
 	saveConfig,
 	VERBOSITY_LEVELS,
 } from "../config.js";
 import { shellPatternFor } from "../safety.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
-import { getGitDiff } from "../git-diff.js";
+import { getGitDiff, getGitBranchAsync } from "../git-diff.js";
 import { modelReference, parseModelReference, providerName } from "../providers.js";
-import { refreshCatalogs, loadAvailableModels, reloadModelsJson } from "../runtime.js";
+import { refreshCatalogs, loadAvailableModels, reloadModelsJson, type AvailableModels } from "../runtime.js";
 import { GITHUB_REPOSITORY, compareVersions, fetchLatestRelease, isHomebrewManaged } from "../update.js";
 import {
 	replaceHarnessSession,
+	createSanitizedBashOperations,
 	type ConfirmCommand,
 	type Harness,
 } from "../session.js";
-import { getPrimaryAgents, type AgentCatalog } from "../agents.js";
 import { VERSION } from "../version.js";
 import {
 	ConfirmOverlay,
@@ -73,8 +71,10 @@ const HELP = `Commands
   /models          List authenticated models
   /scope           Select models that Ctrl+P cycles through
   /effort [level]  Select or set thinking effort
+  /thinking        Alias for /effort
   /verbosity [lvl] Set detail: low (hide tools), normal, high (thinking + expanded tools)
   /mode [ask|auto] Shell approval mode: confirm destructive commands, or run them
+  /permissions     Alias for /mode
   /copy            Copy the last assistant response
   /debug           Write UI/session diagnostics to a log file
   /reload          Reload config, session resources, and model catalogs
@@ -82,7 +82,15 @@ const HELP = `Commands
   /editor          Compose the prompt in $EDITOR
   /diff [path]     Show git status, stat, and patch
   /session         Show session details and token usage
+  /new             Start a new session
+  /resume          Switch to an earlier session
+  /fork            Fork from a previous message
+  /compact         Compact the session context
+  /name [text]     Name the current session
+  /export [fmt]    Export the session (jsonl or html)
+  /agent           Show the active agent
   /login           Show authentication instructions
+  /logout          Show credential removal instructions
   /quit            Exit io
 
 Keys
@@ -97,6 +105,26 @@ Keys
 
 Approval prompt: ↑/↓ to choose, Enter to confirm, Esc to deny (default is deny).`;
 
+/** Commands that are safe to run while the agent is streaming. */
+const BUSY_SAFE_COMMANDS = new Set([
+	"/help",
+	"/session",
+	"/diff",
+	"/models",
+	"/copy",
+	"/debug",
+	"/agent",
+	"/login",
+	"/logout",
+	"/verbosity",
+	"/quit",
+	"/exit",
+	"/q",
+]);
+
+/** Keep long sessions bounded; older rendered blocks are detached from the TUI. */
+const MAX_TRANSCRIPT_CHILDREN = 500;
+
 interface IoAppOptions {
 	cwd: string;
 	paths: IoPaths;
@@ -105,6 +133,12 @@ interface IoAppOptions {
 	model: Model<any>;
 	config: IoConfig;
 	warnings?: string[];
+	/** Inject a terminal for tests; defaults to the real process terminal. */
+	terminal?: Terminal;
+	/** Disable the background catalog refresh (tests/offline). */
+	backgroundRefresh?: boolean;
+	/** Override the model catalog (tests/embedders). */
+	availableModels?: () => Promise<AvailableModels>;
 }
 
 function messageText(message: { content?: unknown }): string {
@@ -162,6 +196,7 @@ export class IoApp {
 	private lastUsage: Usage | undefined;
 	private lastDurationMs: number | undefined;
 	private toolEntries: Array<{ block: ToolBlock; entry: ToolEntry; pinned: boolean }> = [];
+	private transcriptPruneNoticeShown = false;
 	private activeTools = new Map<string, ToolBlock>();
 	private activeAssistant: AssistantBlock | undefined;
 	private activeOverlay: OverlayHandle | undefined;
@@ -169,6 +204,7 @@ export class IoApp {
 	private cwdLabel = "";
 	private branch: string | undefined;
 	private lastBranchCheck = 0;
+	private branchRefreshInFlight = false;
 	private lastCtrlC = 0;
 	private config: IoConfig;
 	private verbosity: Verbosity = "normal";
@@ -177,6 +213,8 @@ export class IoApp {
 	private lastAssistantText = "";
 	private programDone = false;
 	private programError: string | undefined;
+	private statsCache: SessionStats | undefined;
+	private statsAt = 0;
 	private awaitingConfirm = false;
 	private awaitingCommand = "";
 	private awaitingSince = 0;
@@ -197,15 +235,14 @@ export class IoApp {
 		this.session = options.harness.session;
 		this.config = { ...options.config };
 		this.verbosity = this.config.verbosity ?? "normal";
-		this.permissionMode = resolvePermissionMode(this.config);
+		this.permissionMode = options.harness.getPermissionMode();
 		this.bell = this.config.bell !== false;
 		this.thinkingVisible = this.verbosity === "high";
 		this.toolOutputExpanded = this.verbosity === "high";
-		const branchNow = getGitBranch(options.cwd);
-		this.branch = branchNow;
 		this.cwdLabel = formatCwdForFooter(options.cwd, homedir());
-		this.lastBranchCheck = Date.now();
-		this.tui = new TuiMainScreen(new ProcessTerminal());
+		this.lastBranchCheck = 0;
+		this.refreshGitBranch();
+		this.tui = new TuiMainScreen(options.terminal ?? new ProcessTerminal());
 		this.header = new Text(
 			`${style.bold("io")}${style.dim(` ${VERSION}`)}\n${style.dim(options.cwd)}`,
 			0,
@@ -237,7 +274,9 @@ export class IoApp {
 		// Merge fresh provider catalogs in the background (like Pi), so new
 		// models appear in /model without a manual refresh. Never blocks
 		// the first paint; the picker just sees the snapshot at open time.
-		void refreshCatalogs(this.options.runtime, undefined, { force: false });
+		if (this.options.backgroundRefresh !== false) {
+			void refreshCatalogs(this.options.runtime, undefined, { force: false });
+		}
 		this.tui.requestRender();
 
 		return new Promise<number>((resolve) => {
@@ -314,6 +353,7 @@ export class IoApp {
 			this.transcript.addChild(new Spacer(1));
 		}
 		this.transcript.addChild(component);
+		this.pruneTranscript();
 		this.tui.requestRender();
 	}
 
@@ -322,8 +362,30 @@ export class IoApp {
 		entry.setVisible(this.verbosity !== "low" || options.pinned === true);
 		this.transcript.addChild(entry);
 		this.toolEntries.push({ block, entry, pinned: options.pinned === true });
+		this.pruneTranscript();
 		this.tui.requestRender();
 		return entry;
+	}
+
+	private pruneTranscript(): void {
+		if (this.transcript.children.length <= MAX_TRANSCRIPT_CHILDREN) return;
+		while (this.transcript.children.length > MAX_TRANSCRIPT_CHILDREN) {
+			const oldest = this.transcript.children[0];
+			if (!oldest) break;
+			this.transcript.removeChild(oldest);
+		}
+		const live = new Set(this.transcript.children);
+		this.toolEntries = this.toolEntries.filter((entry) => live.has(entry.entry));
+		this.assistantBlocks = this.assistantBlocks.filter((block) => live.has(block));
+		if (!this.transcriptPruneNoticeShown) {
+			this.transcriptPruneNoticeShown = true;
+			this.transcript.addChild(new Spacer(1));
+			this.transcript.addChild(
+				new NoticeBlock("older transcript blocks hidden; the full context is still available to the model", {
+					dim: true,
+				}),
+			);
+		}
 	}
 
 	private addNotice(text: string, options: { dim?: boolean; bold?: boolean } = {}): void {
@@ -366,6 +428,8 @@ export class IoApp {
 				this.status = "generating";
 				this.lastUsage = undefined;
 				this.lastDurationMs = undefined;
+				this.statsCache = undefined;
+				this.statsAt = 0;
 				this.updateFooterAndTitle();
 				break;
 			case "agent_end":
@@ -411,6 +475,8 @@ export class IoApp {
 						this.lastUsage = assistant.usage;
 						this.lastDurationMs = assistant.durationMs;
 					}
+					this.statsCache = undefined;
+					this.statsAt = 0;
 					if (assistant.stopReason === "error") {
 						this.programError = oneLine(assistant.errorMessage || "unknown error", 120);
 					} else if (assistant.stopReason === "aborted") {
@@ -674,17 +740,38 @@ export class IoApp {
 		return `running ${toolName}`;
 	}
 
+	private refreshGitBranch(): void {
+		const now = Date.now();
+		if (this.branchRefreshInFlight || now - this.lastBranchCheck < 10_000) return;
+		this.lastBranchCheck = now;
+		this.branchRefreshInFlight = true;
+		void getGitBranchAsync(this.options.cwd)
+			.then((branch) => {
+				if (branch === this.branch) return;
+				this.branch = branch;
+				this.updateFooter();
+			})
+			.finally(() => {
+				this.branchRefreshInFlight = false;
+			});
+	}
+
+	private getStats(): SessionStats {
+		const now = Date.now();
+		if (!this.statsCache || now - this.statsAt > 1_000) {
+			this.statsCache = this.session.getSessionStats();
+			this.statsAt = now;
+		}
+		return this.statsCache;
+	}
+
 	private updateFooter(): void {
 		const model = this.session.model ?? this.options.model;
-		const stats = this.session.getSessionStats();
+		const stats = this.getStats();
 		const streaming = this.busy || this.session.isStreaming;
 		const totals = stats.tokens;
 		const promptDenominator = totals.input + totals.cacheRead + totals.cacheWrite;
-		const now = Date.now();
-		if (now - this.lastBranchCheck > 10_000) {
-			this.lastBranchCheck = now;
-			this.branch = getGitBranch(this.options.cwd);
-		}
+		this.refreshGitBranch();
 		this.footer.setState({
 			cwd: this.cwdLabel,
 			branch: this.branch,
@@ -709,6 +796,7 @@ export class IoApp {
 		if (matchesKey(data, Key.ctrl("c"))) {
 			if (this.activeOverlay) return undefined;
 			if (this.busy || this.session.isStreaming) {
+				this.lastCtrlC = Date.now();
 				void this.cancelGeneration();
 				return { consume: true };
 			}
@@ -744,14 +832,14 @@ export class IoApp {
 
 		if (matchesKey(data, Key.ctrl("p"))) {
 			if (this.activeOverlay) return undefined;
-			if (this.busy) return undefined;
+			if (this.busy || this.session.isStreaming) return undefined;
 			void this.cycleModel("forward");
 			return { consume: true };
 		}
 
 		if (matchesKey(data, Key.ctrlShift("p"))) {
 			if (this.activeOverlay) return undefined;
-			if (this.busy) return undefined;
+			if (this.busy || this.session.isStreaming) return undefined;
 			void this.cycleModel("backward");
 			return { consume: true };
 		}
@@ -873,6 +961,11 @@ export class IoApp {
 			}
 			await this.session.prompt(text, promptOptions);
 		} catch (error) {
+			if (!this.session.isStreaming) {
+				this.busy = false;
+				this.activeAssistant?.dispose();
+				this.activeAssistant = undefined;
+			}
 			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
 			this.status = undefined;
 			this.updateFooterAndTitle();
@@ -936,7 +1029,10 @@ export class IoApp {
 					output += chunk;
 					block.setPartial({ content: [{ type: "text", text: output }] });
 				},
-				{ excludeFromContext: excluded },
+				{
+					excludeFromContext: excluded,
+					operations: createSanitizedBashOperations(this.options.paths),
+				},
 			);
 			const durationMs = Date.now() - started;
 			const isError = (result.exitCode ?? 0) !== 0 || result.cancelled;
@@ -960,6 +1056,12 @@ export class IoApp {
 		const space = input.indexOf(" ");
 		const command = space === -1 ? input : input.slice(0, space);
 		const argument = space === -1 ? "" : input.slice(space + 1).trim();
+		if ((this.busy || this.session.isStreaming) && !BUSY_SAFE_COMMANDS.has(command)) {
+			this.addNotice("Wait for the current response to finish before changing session state.", {
+				dim: true,
+			});
+			return;
+		}
 		switch (command) {
 			case "/help":
 				this.addNotice(HELP, { dim: true });
@@ -1125,6 +1227,7 @@ export class IoApp {
 		}
 		const next = mode as PermissionMode;
 		this.permissionMode = next;
+		this.options.harness.setPermissionMode(next);
 		this.config = { ...this.config, permissionMode: next };
 		try {
 			saveConfig(this.options.paths, this.config);
@@ -1142,6 +1245,10 @@ export class IoApp {
 
 	private async showEffortSelector(): Promise<void> {
 		if (this.activeOverlay) return;
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before changing effort.", { dim: true });
+			return;
+		}
 		const levels = this.session.getAvailableThinkingLevels();
 		if (levels.length === 0) {
 			this.addNotice("This model does not expose thinking levels.", { dim: true });
@@ -1207,7 +1314,7 @@ export class IoApp {
 		this.status = "compacting";
 		this.updateFooterAndTitle();
 		try {
-			const result = await this.session.compact();
+			await this.session.compact();
 			this.addNotice("context compacted", { dim: true });
 		} catch (error) {
 			this.addNotice(`could not compact: ${(error as Error).message}`, { bold: true });
@@ -1218,7 +1325,6 @@ export class IoApp {
 	}
 
 	private updateAgentAutocomplete(): void {
-		const primaryAgents = getPrimaryAgents(this.options.harness.agentCatalog);
 		const currentAgent = this.options.harness.agent;
 		this.editor.setAutocompleteProvider(
 			new CombinedAutocompleteProvider(
@@ -1229,6 +1335,9 @@ export class IoApp {
 					{ name: "scope", description: "Select models Ctrl+P cycles through" },
 					{ name: "effort", description: "Select or set thinking effort", argumentHint: "[level]" },
 					{ name: "verbosity", description: "Set transcript detail", argumentHint: "[low|normal|high]" },
+					{ name: "mode", description: "Set shell approval mode", argumentHint: "[ask|auto]" },
+					{ name: "permissions", description: "Alias for /mode", argumentHint: "[ask|auto]" },
+					{ name: "thinking", description: "Alias for /effort", argumentHint: "[level]" },
 					{ name: "compact", description: "Compact the session context" },
 					{ name: "new", description: "Start a new session" },
 					{ name: "resume", description: "Open another session" },
@@ -1236,10 +1345,6 @@ export class IoApp {
 					{ name: "export", description: "Export the session", argumentHint: "[jsonl|html] [path]" },
 					{ name: "fork", description: "Fork the session from a previous message", argumentHint: "[message]" },
 					{ name: "agent", description: `Show current agent (current: ${currentAgent.id})`, argumentHint: "" },
-					...primaryAgents.map((agent) => ({
-						name: agent.id,
-						description: `${agent.name} agent (${agent.kind})`,
-					})),
 					{ name: "diff", description: "Show git changes", argumentHint: "[path]" },
 					{ name: "copy", description: "Copy the last assistant response" },
 					{ name: "debug", description: "Write diagnostics to a log file" },
@@ -1248,6 +1353,7 @@ export class IoApp {
 					{ name: "editor", description: "Compose the prompt in $EDITOR" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
+					{ name: "logout", description: "Credential removal instructions" },
 					{ name: "quit", description: "Exit io" },
 					{ name: "exit", description: "Exit io" },
 					{ name: "q", description: "Exit io" },
@@ -1265,12 +1371,16 @@ export class IoApp {
 		this.footer.setSession(this.session);
 		this.subscribe();
 		this.updateAgentAutocomplete();
+		this.permissionMode = this.options.harness.getPermissionMode();
 		this.transcript.clear();
 		this.toolEntries = [];
+		this.transcriptPruneNoticeShown = false;
 		this.activeTools.clear();
 		this.activeAssistant = undefined;
 		this.lastUsage = undefined;
 		this.lastDurationMs = undefined;
+		this.statsCache = undefined;
+		this.statsAt = 0;
 		this.busy = false;
 		this.status = undefined;
 		this.programDone = false;
@@ -1499,12 +1609,20 @@ export class IoApp {
 		}
 	}
 
+	private loadModels(): Promise<AvailableModels> {
+		return this.options.availableModels?.() ?? loadAvailableModels(this.options.runtime);
+	}
+
 	private async showModelPicker(): Promise<void> {
 		if (this.activeOverlay) return;
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before changing models.", { dim: true });
+			return;
+		}
 		this.status = "loading models";
 		this.updateFooterAndTitle();
 		try {
-			const available = await loadAvailableModels(this.options.runtime);
+			const available = await this.loadModels();
 			if (available.models.length === 0) {
 				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
 				return;
@@ -1568,7 +1686,7 @@ export class IoApp {
 		this.status = "loading models";
 		this.updateFooterAndTitle();
 		try {
-			const available = await loadAvailableModels(this.options.runtime);
+			const available = await this.loadModels();
 			const allModels = available.models;
 			if (allModels.length <= 1) {
 				this.addNotice("Only one authenticated model available.", { dim: true });
@@ -1603,7 +1721,7 @@ export class IoApp {
 	}
 
 	private async setModelByReference(reference: string): Promise<void> {
-		const available = await loadAvailableModels(this.options.runtime);
+		const available = await this.loadModels();
 		const models = available.models;
 		const parsed = parseModelReference(reference);
 		const exact = models.find(
@@ -1645,10 +1763,16 @@ export class IoApp {
 
 	private async showScopePicker(): Promise<void> {
 		if (this.activeOverlay) return;
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before changing the model scope.", {
+				dim: true,
+			});
+			return;
+		}
 		this.status = "loading models";
 		this.updateFooterAndTitle();
 		try {
-			const available = await loadAvailableModels(this.options.runtime);
+			const available = await this.loadModels();
 			const models = available.models;
 			if (models.length === 0) {
 				this.addNotice("No authenticated models. Run `io auth login` and try again.", { bold: true });
@@ -1714,7 +1838,7 @@ export class IoApp {
 		this.status = "loading models";
 		this.updateFooterAndTitle();
 		try {
-			const available = await loadAvailableModels(this.options.runtime);
+			const available = await this.loadModels();
 			if (available.models.length === 0) {
 				this.addNotice("No authenticated models. Run `io auth login`.", { bold: true });
 				return;
@@ -1877,7 +2001,18 @@ export class IoApp {
 			for (const warning of reloaded.warnings) {
 				this.addNotice(`warning: ${warning}`, { dim: true });
 			}
-			this.config = reloaded.config;
+			if (reloaded.error) {
+				// Keep the last known good configuration instead of failing open
+				// with an empty permission set.
+				this.addNotice("reload skipped: config could not be read; keeping the current settings", {
+					bold: true,
+				});
+			} else {
+				this.config = reloaded.config;
+				this.options.harness.applyConfig(reloaded.config);
+				this.permissionMode = this.options.harness.getPermissionMode();
+				this.bell = reloaded.config.bell !== false;
+			}
 			this.applyVerbosity(this.config.verbosity ?? "normal", { persist: false, announce: false });
 			await this.session.reload();
 			this.updateAgentAutocomplete();
@@ -2054,7 +2189,16 @@ export class IoApp {
 	}
 
 	private async cancelGeneration(): Promise<void> {
-		if (!this.session.isStreaming) return;
+		if (!this.session.isStreaming) {
+			// A failed prompt can leave `busy` set without an active stream.
+			// Clear it so Ctrl+C twice can exit instead of getting stuck.
+			if (this.busy) {
+				this.busy = false;
+				this.status = undefined;
+				this.updateFooterAndTitle();
+			}
+			return;
+		}
 		this.status = "cancelling";
 		this.updateFooterAndTitle();
 		try {
@@ -2067,6 +2211,9 @@ export class IoApp {
 	private confirmCommand: ConfirmCommand = async ({ command, reason, signal }) => {
 		return new Promise<boolean>((resolve) => {
 			let settled = false;
+			// An approval owns the only overlay slot. Close a stale picker first
+			// instead of overwriting it and leaking its focus/dispose state.
+			if (this.activeOverlay) this.closeOverlay();
 			const short = oneLine(command, 90);
 			// The overlay is the prompt; this notice is the record of it, so a
 			// missed overlay still leaves a line saying what was asked and how it ended.
@@ -2097,11 +2244,15 @@ export class IoApp {
 					void this.cancelGeneration();
 				},
 				() => {
-					// Persist the "allow always" answer as a permissions rule NOW, so
-					// the `beforeToolCall` hook applies it to the next tool call in THIS
-					// session (the hook re-reads the file on every check).
+					// Update the in-memory permission state first so the next tool
+					// call in this session is allowed, then persist the rule.
 					try {
 						const pattern = shellPatternFor(command);
+						const added = this.options.harness.addPermissionRule({ resource: pattern, effect: "allow" });
+						if (!added) {
+							this.addNotice(`allow rule already active: ${pattern}`, { dim: true });
+							return;
+						}
 						this.config = {
 							...this.config,
 							permissions: [...(this.config.permissions ?? []), { resource: pattern, effect: "allow" }],
@@ -2135,9 +2286,20 @@ export class IoApp {
 		return this.confirmCommand;
 	}
 
+	/** Public shutdown hook for process signal handlers. */
+	shutdown(code = 0): void {
+		this.exit(code);
+	}
+
 	private exit(code: number): void {
 		if (this.exiting) return;
 		this.exiting = true;
+		this.stopAwaitingTimer();
+		if (this.activeOverlay) this.closeOverlay();
+		if (this.statusLoader) {
+			this.statusLoader.stop();
+			this.statusLoader = undefined;
+		}
 		if (this.spinnerTimer !== undefined) {
 			clearInterval(this.spinnerTimer);
 			this.spinnerTimer = undefined;

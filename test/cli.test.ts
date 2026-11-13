@@ -11,14 +11,18 @@ const packageVersion = (
 	JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string }
 ).version;
 
-function run(args: string[], env: NodeJS.ProcessEnv = {}): { status: number | null; stdout: string; stderr: string } {
+function run(
+	args: string[],
+	env: NodeJS.ProcessEnv = {},
+	input = "",
+): { status: number | null; stdout: string; stderr: string } {
 	const cleanEnv = { ...process.env };
 	delete cleanEnv.OPENCODE_API_KEY;
 	const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
 		cwd: root,
 		encoding: "utf8",
 		timeout: 20_000,
-		input: "",
+		input,
 		env: { ...cleanEnv, ...env },
 	});
 	return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -89,6 +93,74 @@ test("the bundled Codex OAuth flow is reachable", () => {
 		assert.equal(result.status, 130);
 		assert.match(result.stdout, /login method|Login cancelled/);
 		assert.doesNotMatch(result.stderr, /Cannot find module/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("auth logout without credentials is a no-op", () => {
+	const { env, cleanup } = tempEnv();
+	try {
+		const result = run(["auth", "logout"], env);
+		assert.equal(result.status, 0);
+		assert.match(result.stdout, /No stored credentials to remove/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("auth login without a provider lists providers and can be cancelled", () => {
+	const { env, cleanup } = tempEnv();
+	try {
+		const result = run(["auth", "login"], env, "1\n");
+		assert.equal(result.status, 130);
+		assert.match(result.stdout, /Select a provider to authenticate/);
+		assert.match(result.stdout, /Login cancelled/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("auth login rejects an unknown provider", () => {
+	const { env, cleanup } = tempEnv();
+	try {
+		const result = run(["auth", "login", "not-a-provider"], env);
+		assert.equal(result.status, 1);
+		assert.match(result.stderr, /Unknown provider/);
+	} finally {
+		cleanup();
+	}
+});
+
+test("models.json provider login stores a key and logout removes it", () => {
+	const { env, dir, cleanup } = tempEnv();
+	try {
+		const dataDir = join(dir, "data");
+		mkdirSync(dataDir, { recursive: true });
+		writeFileSync(
+			join(dataDir, "models.json"),
+			`${JSON.stringify({
+				providers: {
+					acme: {
+						baseUrl: "https://example.invalid/v1",
+						api: "openai-completions",
+						models: [{ id: "acme-model", name: "Acme Model" }],
+					},
+				},
+			})}\n`,
+		);
+
+		const login = run(["auth", "login", "acme"], env, "test-key\n");
+		assert.equal(login.status, 0, login.stderr);
+		assert.match(login.stdout, /Saved credentials for acme/);
+		const configPath = join(dir, "config", "config.json");
+		const saved = JSON.parse(readFileSync(configPath, "utf8")) as { provider?: string; model?: string };
+		assert.equal(saved.provider, "acme");
+		assert.equal(saved.model, "acme-model");
+
+		const logout = run(["auth", "logout", "acme"], env);
+		assert.equal(logout.status, 0, logout.stderr);
+		assert.match(logout.stdout, /Removed stored credentials for acme/);
 	} finally {
 		cleanup();
 	}
@@ -196,6 +268,7 @@ test("models.json OpenAI-compatible providers work with auth, models, and config
 		assert.equal(models.status, 0);
 		assert.match(models.stdout, /50x \(50x\)/);
 		assert.match(models.stdout, /DeepSeek-V4\.1-Flash-1017/);
+		assert.match(models.stdout, /\n\s+1\. /);
 
 		const set = run(
 			["config", "set", "model", "50x/deepseek-ai/DeepSeek-V4.1-Flash-1017"],

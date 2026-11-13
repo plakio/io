@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+	ensureIoDirectories,
 	loadConfig,
 	parseConfig,
 	resolveContextSettings,
@@ -93,6 +94,26 @@ test("malformed config does not crash and produces a warning", () => {
 		const loaded = loadConfig(paths);
 		assert.deepEqual(loaded.config, {});
 		assert.match(loaded.warnings[0] ?? "", /could not parse/);
+		assert.match(loaded.error ?? "", /could not parse/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("saveConfig preserves unknown keys written by a newer version", () => {
+	const root = tempRoot();
+	try {
+		const paths = resolvePaths({ IO_CONFIG_DIR: join(root, "config"), IO_DATA_DIR: join(root, "data") });
+		ensureIoDirectories(paths);
+		writeFileSync(
+			paths.configPath,
+			`${JSON.stringify({ futureKey: { nested: true }, verbosity: "high" }, null, 2)}\n`,
+		);
+		const current = loadConfig(paths).config;
+		saveConfig(paths, { ...current, verbosity: "low" });
+		const raw = JSON.parse(readFileSync(paths.configPath, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(raw.futureKey, { nested: true });
+		assert.equal(raw.verbosity, "low");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

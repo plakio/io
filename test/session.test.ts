@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { listSessions } from "../src/session.js";
-import { saveConfig } from "../src/config.js";
+import { saveConfig, loadConfig } from "../src/config.js";
 import { createFauxHarness, temporaryPaths, textEvents, toolResultText } from "./helpers.js";
 
 test("context files and project skills load only when enabled", async () => {
@@ -56,7 +56,7 @@ test("a prompt streams text through the Pi session", async () => {
 		);
 		await harness.harness.session.prompt("say hello");
 		events.unsubscribe();
-		assert.deepEqual(harness.harness.session.getActiveToolNames(), ["bash"]);
+		assert.deepEqual(harness.harness.session.getActiveToolNames(), ["bash", "subagent"]);
 		assert.equal(harness.harness.session.getLastAssistantText(), "hello from the faux provider");
 		assert.equal(events.deltas.join(""), "hello from the faux provider");
 		assert.ok(events.deltas.length > 0);
@@ -240,6 +240,7 @@ test("sessions persist and can be continued", async () => {
 		await first.harness.session.prompt("first message");
 		assert.ok(first.harness.session.sessionFile);
 		assert.equal(existsSync(first.harness.session.sessionFile), true);
+		assert.equal(statSync(first.harness.session.sessionFile).mode & 0o777, 0o600);
 		const sessions = await listSessions(paths, process.cwd());
 		assert.ok(sessions.length >= 1);
 		first.harness.session.dispose();
@@ -263,6 +264,136 @@ test("sessions persist and can be continued", async () => {
 		}
 	} finally {
 		first.cleanup();
+	}
+});
+
+test("editing config mid-session does not change the active permission policy", async () => {
+	const temporary = temporaryPaths();
+	saveConfig(temporary.paths, { permissionMode: "ask" });
+	const marker = mkdtempSync(join(tmpdir(), "io-escalation-"));
+	writeFileSync(join(marker, "file.txt"), "x");
+	const confirmations: string[] = [];
+	const harness = await createFauxHarness({
+		paths: temporary.paths,
+		confirmCommand: async (request) => {
+			confirmations.push(request.command);
+			return false;
+		},
+	});
+	try {
+		const configWrite = `printf '%s' '{"permissionMode":"auto"}' > '${temporary.paths.configPath}'`;
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: configWrite }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("bash", { command: `rm -rf ${marker}` }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.harness.session.prompt("try to escalate");
+		assert.equal(loadConfig(temporary.paths).config.permissionMode, "auto");
+		assert.equal(harness.harness.getPermissionMode(), "ask");
+		assert.ok(confirmations.some((command) => command.includes("rm -rf")));
+		assert.equal(existsSync(marker), true);
+	} finally {
+		harness.harness.session.dispose();
+		harness.cleanup();
+		temporary.cleanup();
+		rmSync(marker, { recursive: true, force: true });
+	}
+});
+
+test("a general subagent inherits the parent permission snapshot", async () => {
+	const temporary = temporaryPaths();
+	saveConfig(temporary.paths, { permissionMode: "ask" });
+	const marker = mkdtempSync(join(tmpdir(), "io-subagent-escalation-"));
+	writeFileSync(join(marker, "file.txt"), "x");
+	const confirmations: string[] = [];
+	const harness = await createFauxHarness({
+		paths: temporary.paths,
+		confirmCommand: async (request) => {
+			confirmations.push(request.command);
+			return false;
+		},
+	});
+	try {
+		const configWrite = `printf '%s' '{"permissionMode":"auto"}' > '${temporary.paths.configPath}'`;
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: configWrite }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("subagent", { agent: "general", task: "delete the marker" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage(fauxToolCall("bash", { command: `rm -rf ${marker}` }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("subagent blocked"),
+			fauxAssistantMessage("parent done"),
+		]);
+		await harness.harness.session.prompt("delegate the escalation");
+		assert.ok(confirmations.some((command) => command.includes("rm -rf")));
+		assert.equal(existsSync(marker), true);
+		assert.equal(harness.harness.getPermissionMode(), "ask");
+	} finally {
+		harness.harness.session.dispose();
+		harness.cleanup();
+		temporary.cleanup();
+		rmSync(marker, { recursive: true, force: true });
+	}
+});
+
+test("applyConfig and addPermissionRule update the in-memory policy", async () => {
+	const harness = await createFauxHarness();
+	try {
+		assert.equal(harness.harness.getPermissionMode(), "ask");
+		harness.harness.applyConfig({
+			permissionMode: "auto",
+			permissions: [{ resource: "rm -rf build", effect: "deny" }],
+		});
+		assert.equal(harness.harness.getPermissionMode(), "auto");
+		assert.deepEqual(harness.harness.getPermissionRules(), [{ resource: "rm -rf build", effect: "deny" }]);
+		assert.equal(harness.harness.addPermissionRule({ resource: "git status *", effect: "allow" }), true);
+		assert.equal(harness.harness.addPermissionRule({ resource: "git status *", effect: "allow" }), false);
+		assert.equal(harness.harness.getPermissionRules().length, 2);
+	} finally {
+		harness.harness.session.dispose();
+		harness.cleanup();
+	}
+});
+
+test("readonly harness blocks shell writes even when they are not risky", async () => {
+	const temporary = temporaryPaths();
+	const marker = join(temporary.paths.dataDir, "readonly-marker");
+	const harness = await createFauxHarness({ paths: temporary.paths, readonly: true });
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: `echo nope > '${marker}'` }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("blocked"),
+		]);
+		await harness.harness.session.prompt("try to write");
+		assert.equal(existsSync(marker), false);
+		assert.match(toolResultText(harness.harness), /read-only/i);
+	} finally {
+		harness.harness.session.dispose();
+		temporary.cleanup();
+	}
+});
+
+test("subagent tool delegates to a fresh in-memory session", async () => {
+	const harness = await createFauxHarness();
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("subagent", { agent: "general", task: "say hi" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("subagent summary"),
+			fauxAssistantMessage("parent done"),
+		]);
+		await harness.harness.session.prompt("delegate");
+		assert.equal(harness.harness.session.getLastAssistantText(), "parent done");
+		assert.match(toolResultText(harness.harness), /subagent summary/);
+		// Only the parent session is persisted; scratch work stays out of /resume.
+		const sessions = await listSessions(harness.paths, process.cwd());
+		assert.equal(sessions.length, 1);
+	} finally {
+		harness.harness.session.dispose();
+		harness.cleanup();
 	}
 });
 

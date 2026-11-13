@@ -42,6 +42,21 @@ export interface IoConfig {
 	skills?: boolean;
 }
 
+const KNOWN_CONFIG_KEYS = new Set([
+	"provider",
+	"model",
+	"thinkingLevel",
+	"verbosity",
+	"primaryAgent",
+	"agents",
+	"scopedModels",
+	"permissions",
+	"permissionMode",
+	"bell",
+	"contextFiles",
+	"skills",
+]);
+
 /** Context settings with their defaults resolved. */
 export function resolveContextSettings(config: IoConfig): { skills: boolean; contextFiles: boolean } {
 	return { skills: config.skills !== false, contextFiles: config.contextFiles !== false };
@@ -214,7 +229,7 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 	return { config, warnings };
 }
 
-export function loadConfig(paths: IoPaths): { config: IoConfig; warnings: string[] } {
+export function loadConfig(paths: IoPaths): { config: IoConfig; warnings: string[]; error?: string } {
 	let content: string;
 	try {
 		content = readFileSync(paths.configPath, "utf8");
@@ -222,25 +237,45 @@ export function loadConfig(paths: IoPaths): { config: IoConfig; warnings: string
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
 			return { config: {}, warnings: [] };
 		}
+		const message = `could not read ${paths.configPath}: ${(error as Error).message}`;
 		return {
 			config: {},
-			warnings: [`could not read ${paths.configPath}: ${(error as Error).message}`],
+			warnings: [message],
+			error: message,
 		};
 	}
 
 	try {
 		return parseConfig(JSON.parse(content) as unknown);
 	} catch (error) {
+		const message = `could not parse ${paths.configPath}: ${(error as Error).message}`;
 		return {
 			config: {},
-			warnings: [`could not parse ${paths.configPath}: ${(error as Error).message}`],
+			warnings: [message],
+			error: message,
 		};
 	}
 }
 
+/**
+ * Persist preferences without dropping keys written by a newer io version.
+ * Known keys are replaced wholesale (so deleting `model` removes it); unknown
+ * keys survive a round-trip.
+ */
 export function saveConfig(paths: IoPaths, config: IoConfig): void {
 	ensureIoDirectories(paths);
-	const content = `${JSON.stringify(config, null, 2)}\n`;
+	let unknown: Record<string, unknown> = {};
+	try {
+		const current = JSON.parse(readFileSync(paths.configPath, "utf8")) as unknown;
+		if (current !== null && typeof current === "object" && !Array.isArray(current)) {
+			for (const [key, value] of Object.entries(current as Record<string, unknown>)) {
+				if (!KNOWN_CONFIG_KEYS.has(key)) unknown[key] = value;
+			}
+		}
+	} catch {
+		// Missing or unreadable config: nothing to preserve.
+	}
+	const content = `${JSON.stringify({ ...unknown, ...config }, null, 2)}\n`;
 	const temporaryPath = `${paths.configPath}.${process.pid}.tmp`;
 	writeFileSync(temporaryPath, content, { encoding: "utf8", mode: 0o600 });
 	renameSync(temporaryPath, paths.configPath);

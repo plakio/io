@@ -1,5 +1,4 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ThinkingLevel } from "./config.js";
 
 export type AgentKind = "primary" | "subagent" | "hidden";
 export type AgentAccess = "full" | "readonly";
@@ -77,7 +76,7 @@ export function getSubagents(catalog: AgentCatalog): AgentDefinition[] {
 }
 
 export function canDelegate(agent: AgentDefinition): boolean {
-	return agent.id === "build";
+	return agent.kind === "primary" && agent.access === "full";
 }
 
 export function isReadonlyAccess(access: AgentAccess): boolean {
@@ -88,11 +87,13 @@ export function resolveAgentModel(
 	agent: AgentDefinition,
 	current: Model<Api> | undefined,
 	runtime: { getModel(provider: string, id: string): Model<Api> | undefined },
+	override?: string,
 ): Model<Api> | undefined {
-	if (!agent.model) return current;
-	const slash = agent.model.indexOf("/");
+	const reference = override ?? agent.model;
+	if (!reference) return current;
+	const slash = reference.indexOf("/");
 	if (slash <= 0) return current;
-	const provider = agent.model.slice(0, slash);
-	const modelId = agent.model.slice(slash + 1);
+	const provider = reference.slice(0, slash);
+	const modelId = reference.slice(slash + 1);
 	return runtime.getModel(provider, modelId) ?? current;
 }

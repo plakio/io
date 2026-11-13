@@ -1,4 +1,5 @@
 import { APP_NAME, APP_TAGLINE } from "./version.js";
+import type { PermissionMode } from "./config.js";
 
 export type Command =
 	| {
@@ -7,6 +8,7 @@ export type Command =
 			sessionId?: string;
 			modelRef?: string;
 			provider?: string;
+			permissionMode?: PermissionMode;
 	  }
 	| { kind: "help" }
 	| { kind: "version" }
@@ -14,7 +16,7 @@ export type Command =
 	| { kind: "auth-logout"; provider?: string }
 	| { kind: "auth-status" }
 	| { kind: "models"; provider?: string; refresh: boolean }
-	| { kind: "sessions" }
+	| { kind: "sessions"; prune?: { olderThanDays: number; yes: boolean } }
 	| {
 			kind: "run";
 			prompt?: string;
@@ -22,6 +24,11 @@ export type Command =
 			sessionId?: string;
 			modelRef?: string;
 			provider?: string;
+			permissionMode?: PermissionMode;
+			readStdin?: boolean;
+			savePreference?: boolean;
+			stats?: boolean;
+			failOnToolError?: boolean;
 	  }
 	| { kind: "config-show" }
 	| { kind: "config-interactive" }
@@ -39,6 +46,7 @@ Usage:
   io auth status              Show authentication status
   io models [provider]        List available models
   io sessions                 List recent sessions for this directory
+  io sessions prune           Delete old session files (dry-run by default)
   io config                   Show or edit configuration interactively
   io config show              Show configuration
   io config edit              Interactive configuration
@@ -49,8 +57,16 @@ Options:
       --session <id>          Open a session by id or id prefix
   -m, --model <ref>           Use provider/model for this run
       --provider <id>         Restrict selection to one provider
+      --mode <ask|auto>       Override permissionMode for this invocation
   -h, --help                  Show this help
   -v, --version               Show the version
+
+Headless options (io run):
+      --stdin                 Read piped stdin even when a prompt is given
+      --no-stdin              Do not read piped stdin
+      --no-save               Do not persist the selected model
+      --stats                 Print token/cost/duration stats to stderr
+      --fail-on-tool-error    Exit non-zero when a tool call fails
 
 Providers:
   opencode-go                 OpenCode Go (API key or OPENCODE_API_KEY)
@@ -58,7 +74,8 @@ Providers:
   amazon-bedrock              Amazon Bedrock (bearer token or AWS credentials)
 
 Session commands:
-  /help  /model  /models  /mode  /diff  /session  /login  /quit
+  /help  /model  /models  /mode  /diff  /session  /new  /resume
+  /compact  /fork  /name  /export  /agent  /login  /quit
 
 Keys:
   Enter                       Send prompt
@@ -76,44 +93,84 @@ function takeValue(args: string[], index: number, flag: string): { value?: strin
 	return { value };
 }
 
+function parseMode(value: string | undefined): { mode?: PermissionMode; error?: string } {
+	if (value === undefined) return { error: "--mode requires a value" };
+	if (value !== "ask" && value !== "auto") {
+		return { error: `invalid --mode "${value}"; use ask or auto` };
+	}
+	return { mode: value };
+}
+
 function parseRunArgs(args: string[]): { command?: Extract<Command, { kind: "run" }>; error?: string } {
 	let continueSession = false;
 	let sessionId: string | undefined;
 	let modelRef: string | undefined;
 	let provider: string | undefined;
+	let permissionMode: PermissionMode | undefined;
+	let readStdin: boolean | undefined;
+	let savePreference = true;
+	let stats = false;
+	let failOnToolError = false;
 	const promptParts: string[] = [];
+	let collectingPrompt = false;
 
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
 		if (arg === undefined) continue;
+		// Once the prompt starts, everything belongs to the prompt. This keeps
+		// `io run explain --help` and `io run what is -c` from being parsed as
+		// io flags.
+		if (collectingPrompt) {
+			promptParts.push(arg);
+			continue;
+		}
+		if (arg === "--") {
+			collectingPrompt = true;
+			continue;
+		}
 		if (arg === "--continue" || arg === "-c") {
 			continueSession = true;
 			continue;
 		}
-		if (arg === "--session") {
-			const result = takeValue(args, index, "--session");
-			if (result.error) return { error: result.error };
-			sessionId = result.value;
-			index++;
+		if (arg === "--no-stdin") {
+			readStdin = false;
 			continue;
 		}
-		if (arg === "--model" || arg === "-m") {
+		if (arg === "--stdin") {
+			readStdin = true;
+			continue;
+		}
+		if (arg === "--no-save") {
+			savePreference = false;
+			continue;
+		}
+		if (arg === "--stats") {
+			stats = true;
+			continue;
+		}
+		if (arg === "--fail-on-tool-error") {
+			failOnToolError = true;
+			continue;
+		}
+		if (arg === "--session" || arg === "--model" || arg === "-m" || arg === "--provider" || arg === "--mode" || arg === "--permission-mode") {
 			const result = takeValue(args, index, arg);
 			if (result.error) return { error: result.error };
-			modelRef = result.value;
 			index++;
-			continue;
-		}
-		if (arg === "--provider") {
-			const result = takeValue(args, index, "--provider");
-			if (result.error) return { error: result.error };
-			provider = result.value;
-			index++;
+			if (arg === "--session") sessionId = result.value;
+			else if (arg === "--provider") provider = result.value;
+			else if (arg === "--mode" || arg === "--permission-mode") {
+				const parsedMode = parseMode(result.value);
+				if (parsedMode.error) return { error: parsedMode.error };
+				permissionMode = parsedMode.mode;
+			} else modelRef = result.value;
 			continue;
 		}
 		if (arg.startsWith("-")) {
-			return { error: `unknown option: ${arg} (io run takes -c, --session, -m, --model, --provider, and a prompt)` };
+			return {
+				error: `unknown option: ${arg} (io run takes -c, --session, -m, --model, --provider, --mode, --no-stdin, --no-save, --stats, --fail-on-tool-error, and a prompt; use -- before a prompt starting with -)`,
+			};
 		}
+		collectingPrompt = true;
 		promptParts.push(arg);
 	}
 
@@ -127,18 +184,26 @@ function parseRunArgs(args: string[]): { command?: Extract<Command, { kind: "run
 	if (sessionId !== undefined) command.sessionId = sessionId;
 	if (modelRef !== undefined) command.modelRef = modelRef;
 	if (provider !== undefined) command.provider = provider;
+	if (permissionMode !== undefined) command.permissionMode = permissionMode;
+	if (readStdin !== undefined) command.readStdin = readStdin;
+	if (!savePreference) command.savePreference = false;
+	if (stats) command.stats = true;
+	if (failOnToolError) command.failOnToolError = true;
 	return { command };
 }
 
 export function parseArgs(args: string[]): ParseResult {
-	if (args.includes("--help") || args.includes("-h") || args[0] === "help") {
+	const first = args[0];
+	if (first === "--help" || first === "-h" || first === "help") {
 		return { command: { kind: "help" } };
 	}
-	if (args.includes("--version") || args.includes("-v") || args[0] === "version") {
+	if (first === "--version" || first === "-v" || first === "version") {
 		return { command: { kind: "version" } };
 	}
+	if (first === "run" && args.length === 2 && (args[1] === "--help" || args[1] === "-h")) {
+		return { command: { kind: "help" } };
+	}
 
-	const first = args[0];
 	switch (first) {
 		case undefined:
 			return { command: { kind: "interactive", continueSession: false } };
@@ -175,11 +240,36 @@ export function parseArgs(args: string[]): ParseResult {
 			}
 			return { command: { kind: "models", provider, refresh } };
 		}
-		case "sessions":
-			if (args.length > 1) {
-				return { error: `unexpected argument: ${args[1] ?? ""}` };
+		case "sessions": {
+			if (args[1] !== "prune") {
+				if (args.length > 1) {
+					return { error: `unexpected argument: ${args[1] ?? ""}` };
+				}
+				return { command: { kind: "sessions" } };
 			}
-			return { command: { kind: "sessions" } };
+			let olderThanDays = 30;
+			let yes = false;
+			for (let index = 2; index < args.length; index++) {
+				const arg = args[index];
+				if (arg === "--yes") {
+					yes = true;
+					continue;
+				}
+				if (arg === "--older-than") {
+					const result = takeValue(args, index, "--older-than");
+					if (result.error) return { error: result.error };
+					index++;
+					const days = Number(result.value);
+					if (!Number.isInteger(days) || days < 1) {
+						return { error: "--older-than requires a positive number of days" };
+					}
+					olderThanDays = days;
+					continue;
+				}
+				return { error: `unknown option: ${arg}` };
+			}
+			return { command: { kind: "sessions", prune: { olderThanDays, yes } } };
+		}
 		case "run": {
 			const parsed = parseRunArgs(args.slice(1));
 			if (parsed.error) return { error: parsed.error };
@@ -217,6 +307,7 @@ export function parseArgs(args: string[]): ParseResult {
 	let sessionId: string | undefined;
 	let modelRef: string | undefined;
 	let provider: string | undefined;
+	let permissionMode: PermissionMode | undefined;
 
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
@@ -225,25 +316,17 @@ export function parseArgs(args: string[]): ParseResult {
 			continueSession = true;
 			continue;
 		}
-		if (arg === "--session") {
-			const result = takeValue(args, index, "--session");
-			if (result.error) return { error: result.error };
-			sessionId = result.value;
-			index++;
-			continue;
-		}
-		if (arg === "--model" || arg === "-m") {
+		if (arg === "--session" || arg === "--model" || arg === "-m" || arg === "--provider" || arg === "--mode" || arg === "--permission-mode") {
 			const result = takeValue(args, index, arg);
 			if (result.error) return { error: result.error };
-			modelRef = result.value;
 			index++;
-			continue;
-		}
-		if (arg === "--provider") {
-			const result = takeValue(args, index, "--provider");
-			if (result.error) return { error: result.error };
-			provider = result.value;
-			index++;
+			if (arg === "--session") sessionId = result.value;
+			else if (arg === "--provider") provider = result.value;
+			else if (arg === "--mode" || arg === "--permission-mode") {
+				const parsedMode = parseMode(result.value);
+				if (parsedMode.error) return { error: parsedMode.error };
+				permissionMode = parsedMode.mode;
+			} else modelRef = result.value;
 			continue;
 		}
 		if (arg.startsWith("-")) {
@@ -260,5 +343,6 @@ export function parseArgs(args: string[]): ParseResult {
 	if (sessionId !== undefined) command.sessionId = sessionId;
 	if (modelRef !== undefined) command.modelRef = modelRef;
 	if (provider !== undefined) command.provider = provider;
+	if (permissionMode !== undefined) command.permissionMode = permissionMode;
 	return { command };
 }

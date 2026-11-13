@@ -34,6 +34,18 @@ export function runConfigShow(paths: IoPaths): void {
 	process.stdout.write(`bell       ${config.bell === false ? "off" : "on"}\n`);
 	process.stdout.write(`skills     ${config.skills === false ? "off" : "on"}\n`);
 	process.stdout.write(`context    ${config.contextFiles === false ? "off" : "on"}\n`);
+	if (config.scopedModels && config.scopedModels.length > 0) {
+		process.stdout.write(`scope      ${config.scopedModels.join(", ")}\n`);
+	}
+	if (config.primaryAgent) {
+		process.stdout.write(`agent      ${config.primaryAgent}\n`);
+	}
+	for (const [agent, value] of Object.entries(config.agents ?? {})) {
+		if (value.model) process.stdout.write(`agent-model ${agent} ${value.model}\n`);
+	}
+	for (const rule of config.permissions ?? []) {
+		process.stdout.write(`permission ${rule.effect.padEnd(5)} ${rule.resource}\n`);
+	}
 	process.stdout.write(`config     ${paths.configPath}\n`);
 	process.stdout.write(`data       ${paths.dataDir}\n`);
 	process.stdout.write(`credentials ${paths.authPath}\n`);

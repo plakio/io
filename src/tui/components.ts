@@ -866,7 +866,6 @@ export interface ToolResultLike {
 
 export class ToolBlock extends Container {
 	private readonly command: string;
-	private readonly toolName: string;
 	private readonly header: PrefixedText;
 	private readonly outputView: Text;
 	private readonly statusView: Text;
@@ -880,7 +879,6 @@ export class ToolBlock extends Container {
 
 	constructor(toolName: string, command: string, requestRender: () => void) {
 		super();
-		this.toolName = toolName;
 		this.command = sanitizeOutput(command);
 		this.requestRender = requestRender;
 		const prefix = toolName === "bash" ? style.bold("$ ") : `${toolName} `;

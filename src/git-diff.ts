@@ -9,7 +9,7 @@ export interface GitDiffResult {
 	truncated?: boolean;
 }
 
-/** Current branch in `cwd`, or undefined when not a git work tree or detached. Fast enough for status bars. */
+/** Current branch in `cwd`, or undefined when not a git work tree or detached. */
 export function getGitBranch(cwd: string): string | undefined {
 	try {
 		const result = spawnSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], {
@@ -18,6 +18,21 @@ export function getGitBranch(cwd: string): string | undefined {
 			stdio: ["ignore", "pipe", "ignore"],
 		});
 		if (result.status !== 0) return undefined;
+		const branch = result.stdout.trim();
+		return branch && branch !== "HEAD" ? branch : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Async branch lookup for the footer; never blocks the render loop. */
+export async function getGitBranchAsync(cwd: string): Promise<string | undefined> {
+	try {
+		const result = await execFileAsync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], {
+			encoding: "utf8",
+			timeout: 2_000,
+			maxBuffer: 64 * 1024,
+		});
 		const branch = result.stdout.trim();
 		return branch && branch !== "HEAD" ? branch : undefined;
 	} catch {

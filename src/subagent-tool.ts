@@ -1,14 +1,14 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { IoPaths } from "./config.js";
+import type { IoPaths, PermissionMode, ShellPermissionRule } from "./config.js";
 import { createHarness, type ConfirmCommand } from "./session.js";
 import { resolveAgentModel, getSubagents, type AgentCatalog } from "./agents.js";
 
 const subagentSchema = Type.Object({
-	agent: Type.Union([Type.Literal("general"), Type.Literal("explore")], {
-		description: "Subagent type: general (can edit/run) or explore (read-only).",
+	agent: Type.String({
+		description: "Subagent type from the current catalog (for example general or explore).",
 	}),
 	task: Type.String({ description: "The task or question to delegate to the subagent." }),
 });
@@ -19,6 +19,9 @@ export interface SubagentToolOptions {
 	modelRuntime: ModelRuntime;
 	currentModel: Model<Api> | undefined;
 	catalog: AgentCatalog;
+	agentModels?: Record<string, { model?: string }>;
+	/** Live parent permission state; read at execution time. */
+	permissionState?: { mode: PermissionMode; rules: readonly ShellPermissionRule[] };
 	confirmCommand?: ConfirmCommand;
 	/** Surfaces permission events the subagent cannot show itself. */
 	notify?: (message: string) => void;
@@ -42,6 +45,7 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 		parameters: subagentSchema,
 		async execute(_toolCallId, { agent, task }, signal, onUpdate, _ctx) {
 			const startedAt = Date.now();
+			const abortSignal = signal;
 			const pushProgress = (message: string) => {
 				onUpdate?.({
 					content: [{ type: "text", text: message }],
@@ -49,7 +53,7 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 				});
 			};
 
-			const definition = getSubagents(catalog).find((candidate) => candidate.id === agent);
+			const definition = subagents.find((candidate) => candidate.id === agent);
 			if (!definition) {
 				return {
 					content: [{ type: "text", text: `Unknown subagent "${agent}". Available: ${names}.` }],
@@ -57,8 +61,16 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 					details: "unknown subagent",
 				};
 			}
+			if (abortSignal?.aborted) {
+				return {
+					content: [{ type: "text", text: `Subagent "${agent}" was cancelled before it started.` }],
+					isError: true,
+					details: "cancelled",
+				};
+			}
 
-			const model = resolveAgentModel(definition, currentModel, modelRuntime);
+			const override = options.agentModels?.[definition.id]?.model;
+			const model = resolveAgentModel(definition, currentModel, modelRuntime, override);
 			if (!model) {
 				return {
 					content: [{ type: "text", text: `No model is available for subagent "${agent}".` }],
@@ -75,15 +87,45 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 				model,
 				systemPrompt: definition.systemPrompt,
 				confirmCommand: readonly ? undefined : confirmCommand,
-				// Read-only subagents never inherit `auto`: destructive commands stay blocked.
-				permissionMode: readonly ? "ask" : undefined,
+				// Read-only subagents never inherit `auto` and reject commands
+				// outside the read-only allowlist. Permission rules are a snapshot
+				// from the parent, not a fresh read of config.json.
+				permissionMode: readonly ? "ask" : options.permissionState?.mode,
+				permissionRules: options.permissionState?.rules,
+				readonly,
 				notify,
+				agent: definition,
+				agentModels: options.agentModels,
+				// Subagent work is scratch context: it must not appear in /resume.
+				sessionManager: SessionManager.inMemory(cwd),
 				continueSession: false,
 			});
+
+			const abortSubagent = () => {
+				void session.session.abort().catch(() => undefined);
+			};
+			if (abortSignal?.aborted) {
+				session.session.dispose();
+				return {
+					content: [{ type: "text", text: `Subagent ${agent} was cancelled.` }],
+					isError: true,
+					details: "cancelled",
+				};
+			}
+			abortSignal?.addEventListener("abort", abortSubagent, { once: true });
 
 			try {
 				pushProgress(`subagent ${agent} starting`);
 				await session.session.prompt(task);
+				if (abortSignal?.aborted) {
+					const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+					pushProgress(`subagent ${agent} cancelled in ${elapsed}s`);
+					return {
+						content: [{ type: "text", text: `Subagent ${agent} was cancelled.` }],
+						isError: true,
+						details: "cancelled",
+					};
+				}
 				const text = session.session.getLastAssistantText() ?? "(no summary returned)";
 				const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
 				pushProgress(`subagent ${agent} completed in ${elapsed}s`);
@@ -100,6 +142,7 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 					details: `subagent ${agent} error`,
 				};
 			} finally {
+				abortSignal?.removeEventListener("abort", abortSubagent);
 				session.session.dispose();
 			}
 		},

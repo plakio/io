@@ -42,6 +42,11 @@ const RISK_RULES: readonly RiskRule[] = [
 		reason: "force push",
 	},
 	{
+		// `git push origin +main` force-updates the remote branch.
+		pattern: /(^|[\s;&|()])git\s+push\b[^\n]*\s\+[^\s]+/,
+		reason: "force push",
+	},
+	{
 		pattern: /(^|[\s;&|()])git\s+reset\s+--hard\b/,
 		reason: "hard reset discards working changes",
 	},
@@ -71,9 +76,44 @@ const RISK_RULES: readonly RiskRule[] = [
 	},
 ];
 
-function normalizeForMatching(command: string): string {
-	return command.replace(/\\\r?\n/g, " ").replace(/\s+/g, " ");
+function stripShellQuoting(command: string): string {
+	let output = "";
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index];
+		if (quote) {
+			if (char === quote) {
+				quote = undefined;
+				continue;
+			}
+			if (char === "\\" && quote === '"' && index + 1 < command.length) {
+				output += command[++index];
+				continue;
+			}
+			output += char;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (char === "\\" && index + 1 < command.length) {
+			output += command[++index];
+			continue;
+		}
+		output += char;
+	}
+	return output;
 }
+
+function normalizeForMatching(command: string): string {
+	// Canonicalize quoting and backslash escapes before matching. A shell does
+	// not care whether `rm` is written as `rm`, `"rm"`, or `r\m`; the risk
+	// rules must see the same command the shell will execute.
+	const normalized = stripShellQuoting(command.replace(/\\\r?\n/g, " "));
+	return normalized.replace(/\s+/g, " ");
+}
+
 
 export function assessCommand(command: string): CommandRisk {
 	const normalized = normalizeForMatching(command);
@@ -97,10 +137,184 @@ export function isDangerousCommand(command: string): boolean {
 	return assessCommand(command).dangerous;
 }
 
+const READONLY_COMMANDS = new Set([
+	"basename",
+	"cat",
+	"column",
+	"cut",
+	"date",
+	"df",
+	"diff",
+	"dirname",
+	"du",
+	"file",
+	"find",
+	"git",
+	"grep",
+	"head",
+	"hostname",
+	"id",
+	"jq",
+	"ls",
+	"printf",
+	"pwd",
+	"realpath",
+	"rg",
+	"sort",
+	"stat",
+	"tail",
+	"tr",
+	"tree",
+	"uname",
+	"uniq",
+	"wc",
+	"which",
+	"whoami",
+]);
+
+const GIT_READONLY_COMMANDS = new Set([
+	"blame",
+	"cat-file",
+	"check-attr",
+	"check-ignore",
+	"describe",
+	"diff",
+	"for-each-ref",
+	"grep",
+	"log",
+	"ls-files",
+	"ls-tree",
+	"merge-base",
+	"name-rev",
+	"rev-list",
+	"rev-parse",
+	"show",
+	"show-ref",
+	"shortlog",
+	"status",
+]);
+
+function basename(value: string): string {
+	const slash = Math.max(value.lastIndexOf("/"), value.lastIndexOf("\\"));
+	return slash === -1 ? value : value.slice(slash + 1);
+}
+
+/**
+ * Shell syntax that can write, chain commands, or expand arbitrary values.
+ * Quotes are respected so a read-only search like `rg 'a|b'` is still allowed.
+ */
+function hasUnsafeShellSyntax(command: string): boolean {
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < command.length; index++) {
+		const char = command[index];
+		if (char === undefined) continue;
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			if (char === '"') {
+				quote = undefined;
+				continue;
+			}
+			if (char === "\\") {
+				index++;
+				continue;
+			}
+			if (char === "$" || char === "`") return true;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (char === "\\") {
+			index++;
+			continue;
+		}
+		if (char === "\n" || char === "\r") return true;
+		if (char === "$" || char === "`") return true;
+		if (";&|<>".includes(char)) return true;
+	}
+	return false;
+}
+
+/**
+ * Strict, conservative policy for the explore subagent. It is an allowlist of
+ * read commands, not a full shell parser: pipelines, redirections, command
+ * substitution, and unknown binaries are rejected.
+ */
+export function isReadonlyCommand(command: string): boolean {
+	if (hasUnsafeShellSyntax(command)) return false;
+	const normalized = normalizeForMatching(command);
+	const tokens = normalized.split(" ").filter(Boolean);
+	const executable = tokens[0];
+	if (!executable) return false;
+	const name = basename(executable);
+	if (!READONLY_COMMANDS.has(name)) return false;
+	if (name === "find") {
+		const forbidden = ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"];
+		if (tokens.some((token) => forbidden.includes(token))) return false;
+	}
+	if (name === "sort") {
+		if (
+			tokens.some(
+				(token) =>
+					token === "-o" ||
+					token.startsWith("-o") ||
+					token.startsWith("--output") ||
+					token === "-T" ||
+					token.startsWith("--temporary-directory") ||
+					token === "--compress-program" ||
+					token.startsWith("--compress-program="),
+			)
+		) {
+			return false;
+		}
+	}
+	if (name === "tree" && tokens.some((token) => token === "-o" || token.startsWith("--output"))) {
+		return false;
+	}
+	if (name === "rg" && tokens.some((token) => token === "--pre" || token.startsWith("--pre="))) {
+		return false;
+	}
+	if (name === "date" && tokens.some((token) => token === "-s" || token.startsWith("--set"))) {
+		return false;
+	}
+	if (name === "hostname" && tokens.length > 1) {
+		return false;
+	}
+	if (name === "git") {
+		const subcommand = tokens[1];
+		if (!subcommand || !GIT_READONLY_COMMANDS.has(subcommand)) return false;
+		const forbidden = [
+			"--output",
+			"--ext-diff",
+			"--textconv",
+			"--open-files-in-pager",
+			"--paginate",
+			"-c",
+			"--exec-path",
+		];
+		if (tokens.some((token) => forbidden.includes(token) || token.startsWith("--output="))) return false;
+	}
+	return true;
+}
+
 /** Built-in deny rules, always active and not overridable by config. */
 const BUILT_IN_DENY_RULES: readonly ShellPermissionRule[] = [
 	{ resource: "*auth.json*", effect: "deny" },
+	// `auth?json` covers shell-glob style single-character substitutions such as auth.?son.
+	{ resource: "*auth?json*", effect: "deny" },
 	{ resource: "*.env", effect: "deny" },
+	{ resource: "*.env.*", effect: "deny" },
+	{ resource: "*.ssh/id_*", effect: "deny" },
+	{ resource: "*.aws/credentials*", effect: "deny" },
+	{ resource: "*application_default_credentials.json*", effect: "deny" },
+	{ resource: "*.git-credentials*", effect: "deny" },
+	{ resource: "*.docker/config.json*", effect: "deny" },
+	{ resource: "*.npmrc*", effect: "deny" },
+	{ resource: "*.netrc*", effect: "deny" },
 ];
 
 /**
@@ -194,6 +408,22 @@ export function shellPatternFor(command: string): string {
 	return normalized;
 }
 
+const PROVIDER_ENV_NAMES = [
+	"OPENCODE_API_KEY",
+	"AWS_BEARER_TOKEN_BEDROCK",
+	// Bedrock also accepts the standard AWS credential chain. Those values are
+	// provider credentials too; keep them out of model-run commands.
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+	"AWS_PROFILE",
+	"AWS_SHARED_CREDENTIALS_FILE",
+	"AWS_CONFIG_FILE",
+	"AWS_WEB_IDENTITY_TOKEN_FILE",
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+	"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+] as const;
+
 /**
  * Provider keys are not needed by agent commands. Keep them out of the child
  * environment so a command like `env` cannot print them into the transcript.
@@ -203,8 +433,7 @@ export function sanitizeBashEnvironment(
 	extraNames: readonly string[] = [],
 ): NodeJS.ProcessEnv {
 	const clean = { ...env };
-	delete clean.OPENCODE_API_KEY;
-	delete clean.AWS_BEARER_TOKEN_BEDROCK;
+	for (const name of PROVIDER_ENV_NAMES) delete clean[name];
 	for (const name of extraNames) delete clean[name];
 	return clean;
 }

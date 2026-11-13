@@ -1,21 +1,23 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
 	createAgentSession,
 	createBashToolDefinition,
+	createLocalBashOperations,
 	DefaultResourceLoader,
 	SessionManager,
 	SettingsManager,
 	type AgentSession,
+	type BashOperations,
 	type ModelRuntime,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { IoPaths, PermissionMode, ThinkingLevel } from "./config.js";
+import type { IoConfig, IoPaths, PermissionMode, ShellPermissionRule, ThinkingLevel } from "./config.js";
 import { loadConfig, resolvePermissionMode } from "./config.js";
 import { DEFAULT_AGENTS, getAgent, canDelegate, type AgentCatalog, type AgentDefinition } from "./agents.js";
-import { decideShellPermission, sanitizeBashEnvironment } from "./safety.js";
+import { decideShellPermission, isReadonlyCommand, sanitizeBashEnvironment } from "./safety.js";
 import { readProviderEnvNames } from "./runtime.js";
 import { buildIoSystemPrompt } from "./system-prompt.js";
 import { createSubagentTool } from "./subagent-tool.js";
@@ -33,15 +35,22 @@ export interface SessionFile {
 
 export async function listSessions(paths: IoPaths, cwd: string): Promise<SessionFile[]> {
 	const sessions = await SessionManager.list(cwd, paths.sessionsDir);
-	return sessions.map((session) => ({
-		path: session.path,
-		id: session.id,
-		created: session.created,
-		modified: session.modified,
-		messageCount: session.messageCount,
-		firstMessage: session.firstMessage,
-		name: session.name,
-	}));
+	return sessions.map((session) => {
+		try {
+			chmodSync(session.path, 0o600);
+		} catch {
+			// Best effort: the session may have disappeared or be read-only.
+		}
+		return {
+			path: session.path,
+			id: session.id,
+			created: session.created,
+			modified: session.modified,
+			messageCount: session.messageCount,
+			firstMessage: session.firstMessage,
+			name: session.name,
+		};
+	});
 }
 
 export async function findSessionByPrefix(
@@ -100,6 +109,22 @@ export interface ConfirmCommandRequest {
 
 export type ConfirmCommand = (request: ConfirmCommandRequest) => Promise<boolean>;
 
+/**
+ * Bash operations for user-initiated `!` commands. They use the same provider
+ * environment redaction as the model's bash tool, and re-read models.json so
+ * `/reload` applies newly referenced environment variables immediately.
+ */
+export function createSanitizedBashOperations(paths: IoPaths): BashOperations {
+	const local = createLocalBashOperations();
+	return {
+		exec: (command, cwd, options) =>
+			local.exec(command, cwd, {
+				...options,
+				env: sanitizeBashEnvironment(options.env ?? process.env, readProviderEnvNames(paths.modelsPath)),
+			}),
+	};
+}
+
 export interface HarnessOptions {
 	cwd: string;
 	paths: IoPaths;
@@ -112,10 +137,17 @@ export interface HarnessOptions {
 	settingsManager?: SettingsManager;
 	confirmCommand?: ConfirmCommand;
 	/**
-	 * Overrides the configured permission mode. Read-only agents force `ask`
-	 * so `auto` in the config cannot unlock destructive commands for them.
+	 * Overrides the configured permission mode for this invocation. Read-only
+	 * agents force `ask` so `auto` in the config cannot unlock destructive
+	 * commands for them.
 	 */
 	permissionMode?: PermissionMode;
+	/** Snapshot of permission rules for child harnesses (subagents/replacements). */
+	permissionRules?: readonly ShellPermissionRule[];
+	/** Reject shell commands that are not on the read-only allowlist. */
+	readonly?: boolean;
+	/** Per-agent model overrides from config. */
+	agentModels?: Record<string, { model?: string }>;
 	/** UI channel for permission events that have no prompt (denials, blocked subagents). */
 	notify?: (message: string) => void;
 	systemPrompt?: string;
@@ -137,10 +169,18 @@ export interface Harness {
 	tools: ToolDefinition<any, any, any>[];
 	agent: AgentDefinition;
 	agentCatalog: AgentCatalog;
+	/** Per-agent model overrides from config. */
+	agentModels: Record<string, { model?: string }>;
 	/** Resolved context flags, preserved when the harness is replaced (/new, /resume, /fork). */
 	context: { skills: boolean; contextFiles: boolean };
-	/** Permission mode override and notice channel, preserved across harness replacement. */
-	permissionMode?: PermissionMode;
+	/** Current in-memory permission state. Config file changes do not apply until applyConfig(). */
+	getPermissionMode(): PermissionMode;
+	getPermissionRules(): readonly ShellPermissionRule[];
+	setPermissionMode(mode: PermissionMode): void;
+	/** Adds a rule once; returns false when an identical rule already exists. */
+	addPermissionRule(rule: ShellPermissionRule): boolean;
+	/** Applies a freshly loaded config after an explicit /reload. */
+	applyConfig(config: IoConfig): void;
 	notify?: (message: string) => void;
 }
 
@@ -150,11 +190,14 @@ export interface ReplaceHarnessOptions {
 	modelRuntime: ModelRuntime;
 	confirmCommand?: ConfirmCommand;
 	permissionMode?: PermissionMode;
+	readonly?: boolean;
 	notify?: (message: string) => void;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	continueSession?: boolean;
 	sessionId?: string;
+	agent?: AgentDefinition;
+	agentModels?: Record<string, { model?: string }>;
 }
 
 export interface SessionReplacement {
@@ -181,11 +224,15 @@ export async function replaceHarnessSession(
 		model: model as Model<Api>,
 		thinkingLevel,
 		confirmCommand: options.confirmCommand,
-		permissionMode: options.permissionMode ?? current.permissionMode,
+		permissionMode: options.permissionMode ?? current.getPermissionMode(),
+		permissionRules: current.getPermissionRules(),
+		readonly: options.readonly,
 		notify: options.notify ?? current.notify,
 		continueSession: options.continueSession,
 		sessionId: options.sessionId,
+		agent: options.agent ?? current.agent,
 		agentCatalog: current.agentCatalog,
+		agentModels: options.agentModels ?? current.agentModels,
 		context: current.context,
 	});
 
@@ -226,6 +273,11 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		throw new Error(resolved.error);
 	}
 	const hadExistingMessages = resolved.manager.buildSessionContext().messages.length > 0;
+	const initialConfig = loadConfig(options.paths).config;
+	const permissionState = {
+		mode: options.permissionMode ?? resolvePermissionMode(initialConfig),
+		rules: [...(options.permissionRules ?? initialConfig.permissions ?? [])],
+	};
 
 	const settingsManager = options.settingsManager ?? SettingsManager.inMemory();
 	const contextOptions = options.context ?? {};
@@ -247,11 +299,12 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 	});
 	await resourceLoader.reload();
 
-	const providerEnvNames = readProviderEnvNames(options.paths.modelsPath);
 	const bashTool = createBashToolDefinition(options.cwd, {
 		spawnHook: (context) => ({
 			...context,
-			env: sanitizeBashEnvironment(context.env, providerEnvNames),
+			// Read the names on every command: /reload can add a models.json
+			// provider without requiring an io restart.
+			env: sanitizeBashEnvironment(context.env, readProviderEnvNames(options.paths.modelsPath)),
 		}),
 	});
 
@@ -266,6 +319,8 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 				modelRuntime: options.modelRuntime,
 				currentModel: options.model,
 				catalog,
+				agentModels: options.agentModels,
+				permissionState,
 				confirmCommand: options.confirmCommand,
 				notify: options.notify,
 			}) as unknown as ToolDefinition,
@@ -282,7 +337,8 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		resourceLoader,
 		sessionManager: resolved.manager,
 		settingsManager,
-		tools: ["bash"],
+		// `tools` is an allowlist: every custom tool must be named here too.
+		tools: customTools.map((tool) => tool.name),
 		customTools,
 	});
 
@@ -293,6 +349,19 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		version: VERSION,
 		attribution: null,
 	};
+	const secureSessionFile = () => {
+		const file = session.sessionFile;
+		if (!file) return;
+		try {
+			chmodSync(file, 0o600);
+		} catch {
+			// The file may not exist until the first message is appended.
+		}
+	};
+	secureSessionFile();
+	session.subscribe((event) => {
+		if (event.type === "message_end" || event.type === "agent_settled") secureSessionFile();
+	});
 
 	const confirmCommand = options.confirmCommand;
 	const notify = options.notify;
@@ -300,17 +369,19 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		if (context.toolCall.name !== "bash") return undefined;
 		const command = (context.args as { command?: unknown }).command;
 		if (typeof command !== "string") return undefined;
-		// Read permissions fresh from disk on every check, so an "allow always"
-		// saved by the TUI (or a `/mode` switch, or an external edit) applies to
-		// THIS session now.
-		const config = loadConfig(options.paths).config;
-		const rules = config.permissions ?? [];
-		const mode = options.permissionMode ?? resolvePermissionMode(config);
-		const decision = decideShellPermission(rules, command, mode);
+		// Permission state is session-local. Reading config.json here would let
+		// the model rewrite its own policy with a shell command.
+		const decision = decideShellPermission(permissionState.rules, command, permissionState.mode);
 		if (decision.decision === "deny") {
 			return {
 				block: true,
 				reason: `Blocked by io permissions (${decision.reason ?? "deny rule"}): ${command}`,
+			};
+		}
+		if (options.readonly && !isReadonlyCommand(command)) {
+			return {
+				block: true,
+				reason: `Blocked: this subagent is read-only and may not run: ${command}`,
 			};
 		}
 		if (decision.decision === "allow") return undefined;
@@ -342,8 +413,25 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		tools: customTools,
 		agent,
 		agentCatalog: catalog,
+		agentModels: options.agentModels ?? {},
 		context: { skills, contextFiles },
-		permissionMode: options.permissionMode,
+		getPermissionMode: () => permissionState.mode,
+		getPermissionRules: () => permissionState.rules,
+		setPermissionMode: (mode) => {
+			permissionState.mode = mode;
+		},
+		addPermissionRule: (rule) => {
+			const exists = permissionState.rules.some(
+				(candidate) => candidate.resource === rule.resource && candidate.effect === rule.effect,
+			);
+			if (exists) return false;
+			permissionState.rules.push(rule);
+			return true;
+		},
+		applyConfig: (config) => {
+			permissionState.mode = resolvePermissionMode(config);
+			permissionState.rules = [...(config.permissions ?? [])];
+		},
 		notify: options.notify,
 	};
 }

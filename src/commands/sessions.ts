@@ -1,3 +1,5 @@
+import { lstatSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { resolvePaths, type IoPaths } from "../config.js";
 import { formatCount, oneLine } from "../format.js";
 import { LinePrompter } from "../term-prompt.js";
@@ -13,7 +15,59 @@ function formatDate(date: Date): string {
 	return date.toISOString().slice(0, 10);
 }
 
-export async function runSessions(paths: IoPaths = resolvePaths(), cwd = process.cwd()): Promise<void> {
+function pruneSessions(paths: IoPaths, olderThanDays: number, yes: boolean): void {
+	const cutoff = Date.now() - olderThanDays * 86_400_000;
+	let files: string[] = [];
+	try {
+		files = readdirSync(paths.sessionsDir);
+	} catch {
+		process.stdout.write(`No session directory at ${paths.sessionsDir}.\n`);
+		return;
+	}
+	const candidates: Array<{ path: string; size: number }> = [];
+	for (const name of files) {
+		if (!name.endsWith(".jsonl")) continue;
+		const path = join(paths.sessionsDir, name);
+		try {
+			const stat = lstatSync(path);
+			if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
+			candidates.push({ path, size: stat.size });
+		} catch {
+			// Ignore files that disappeared or cannot be inspected.
+		}
+	}
+	const bytes = candidates.reduce((total, entry) => total + entry.size, 0);
+	process.stdout.write(
+		`${candidates.length} session${candidates.length === 1 ? "" : "s"} older than ${olderThanDays} days (${(bytes / 1024 / 1024).toFixed(1)} MB).\n`,
+	);
+	for (const candidate of candidates) {
+		if (!yes) process.stdout.write(`  would delete ${candidate.path}\n`);
+	}
+	if (!yes) {
+		process.stdout.write("Dry run. Re-run with --yes to delete these files.\n");
+		return;
+	}
+	let deleted = 0;
+	for (const candidate of candidates) {
+		try {
+			rmSync(candidate.path, { force: true });
+			deleted += 1;
+		} catch (error) {
+			process.stderr.write(`io: could not delete ${candidate.path}: ${(error as Error).message}\n`);
+		}
+	}
+	process.stdout.write(`Deleted ${deleted} session${deleted === 1 ? "" : "s"}.\n`);
+}
+
+export async function runSessions(
+	paths: IoPaths = resolvePaths(),
+	cwd = process.cwd(),
+	prune?: { olderThanDays: number; yes: boolean },
+): Promise<void> {
+	if (prune) {
+		pruneSessions(paths, prune.olderThanDays, prune.yes);
+		return;
+	}
 	const sessions = await listSessions(paths, cwd);
 	if (sessions.length === 0) {
 		process.stdout.write(`No sessions for ${cwd}.\n`);

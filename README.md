@@ -2,7 +2,7 @@
 
 IO is a minimal AI harness for the terminal, developed and maintained by [Plak](https://github.com/plakio).
 
-It gives the model one tool — a Bash shell — and keeps everything else small: a Pi-styled terminal interface, persistent sessions, real token accounting, and the [Pi SDK](https://github.com/earendil-works/pi) underneath.
+It gives the model a Bash shell — and optional subagents — and keeps everything else small: a Pi-styled terminal interface, persistent sessions, real token accounting, and the [Pi SDK](https://github.com/earendil-works/pi) underneath.
 
 IO is not only a coding agent. It is useful for programming, file manipulation, system administration, repository work, research with standard command-line utilities, and automation.
 
@@ -10,11 +10,13 @@ IO is not only a coding agent. It is useful for programming, file manipulation, 
 
 > Give the model a shell and keep everything else simple.
 
-There is no MCP integration, plugin marketplace, subagent system, browser automation, or large custom tool collection. The model uses `bash`, `git`, `rg`, `find`, `sed`, `awk`, `curl`, `jq`, and the rest of the Unix toolbox.
+There is no MCP integration, plugin marketplace, browser automation, or large custom tool collection. The model uses `bash`, `git`, `rg`, `find`, `sed`, `awk`, `curl`, `jq`, and the rest of the Unix toolbox.
+
+The shell is intentionally powerful and runs with your user permissions. IO's permission rules are a speed bump for mistakes, **not a sandbox**: see [Security](#security).
 
 ## Features
 
-- One agent tool: Bash.
+- Bash as the primary tool, plus general and read-only exploration subagents.
 - Streaming terminal output with clear command/tool separation.
 - OpenCode Go API-key authentication and OpenAI Codex OAuth through the Pi SDK.
 - Custom OpenAI-compatible endpoints through `models.json`.
@@ -188,10 +190,14 @@ io run "summarize this repository"     # print the answer and exit
 io run --continue "what changed?"      # continue the latest session
 io run --session <id-prefix> "..."     # continue a specific session
 io run -m opencode-go/glm-5.3 "..."    # override the model for this run
+io run --mode auto "run the tests"     # override permission mode for this invocation
+io run --stats "review this diff"      # print tokens, cost, and duration to stderr
+io run --fail-on-tool-error "deploy"   # exit non-zero if a command fails
 echo "explain this error" | io run     # read the prompt from stdin
+io run --no-stdin "..."              # never wait for stdin
 ```
 
-Headless runs write assistant text to stdout. Commands that need confirmation are denied because there is no TUI; add a `permissions` allow rule, or set `"permissionMode": "auto"`, to pre-approve commands for automation.
+Headless runs write assistant text to stdout. Piped stdin is read only when no prompt argument is given unless `--stdin` is explicit. Commands that need confirmation are denied because there is no TUI; add a `permissions` allow rule, use `--mode auto`, or set `"permissionMode": "auto"` in config. `--no-save` prevents a headless run from changing the default model. `--stats` and `--fail-on-tool-error` are intended for CI. A completed turn exits 0 (even without text if it made tool calls); provider errors exit 1; an interrupted run exits 130.
 
 ### Project context
 
@@ -209,6 +215,18 @@ io config set skills off
 
 Sessions compact their context automatically before the model window fills. Use `/compact` to force it.
 
+### Subagents
+
+The build agent can delegate focused work to a subagent with fresh context:
+
+- `general` — full shell access; useful for independent edits or research.
+- `explore` — read-only allowlist; rejects redirections, pipelines, command substitution, writes, and unknown binaries.
+
+Subagent sessions are in-memory and do not appear in `/resume`. Per-agent models can be set in `config.json`:
+```json
+{ "agents": { "explore": { "model": "opencode-go/glm-5.3" } } }
+```
+
 ### Keys
 
 | Key | Action |
@@ -224,18 +242,36 @@ Sessions compact their context automatically before the model window fills. Use 
 
 Pastes are inserted as the actual text. Large pasted content can be reviewed and edited in the input area before sending.
 
+Prefix a line with `!` to run a shell command directly; its output is added to context. Use `!!` to exclude the output from context (the transcript still shows it).
+
 ### Session commands
 
 ```text
 /help            show commands and keys
 /model [ref]     select a model
 /models          list authenticated models
+/scope           select models Ctrl+P cycles through
 /effort [level]  select or set thinking effort
+/thinking        alias for /effort
 /verbosity [lvl] set detail: low hides tool panels, high shows thinking and expanded tools
 /mode [ask|auto] shell approval mode: confirm destructive commands, or run them
+/permissions     alias for /mode
 /diff [path]     show git status, stat, and patch
 /session         show session details and token usage
+/new             start a new session
+/resume          switch to an earlier session
+/fork            fork from a previous message
+/compact         compact the session context
+/name [text]     name the current session
+/export [fmt]    export the session (html or jsonl)
+/agent           show the active agent
+/copy            copy the last assistant response
+/debug           write UI/session diagnostics to a log file
+/reload          reload config, resources, and model catalogs
+/update          install the latest io release with Homebrew
+/editor          compose the prompt in $EDITOR
 /login           authentication instructions
+/logout          credential removal instructions
 /quit            exit
 ```
 
@@ -245,6 +281,8 @@ Pastes are inserted as the actual text. Large pasted content can be reviewed and
 io --continue              # continue the most recent session in this directory
 io sessions                # list recent sessions for this directory
 io --session <id-prefix>   # open a specific session
+io sessions prune          # dry-run: show sessions older than 30 days
+io sessions prune --older-than 7 --yes
 ```
 
 Session files are stored under `~/.local/share/io/sessions` (or `$XDG_DATA_HOME/io/sessions`) and grouped by working directory.
@@ -298,7 +336,7 @@ While a prompt is open IO says so three ways, so a missed prompt cannot pass for
 - `ask` (default) — confirm them.
 - `auto` — run them without confirmation. Built-in denies for credential files still apply, and explicit `deny` rules still win. While it is on, the footer shows a red `AUTO-APPROVE` badge.
 
-Switch it in-session with `/mode ask` or `/mode auto` (persisted), or with `io config set mode ask|auto`. A read-only subagent never inherits `auto`, and a command blocked without any way to ask the user is reported to the model and to the transcript instead of failing silently.
+Switch it in-session with `/mode ask` or `/mode auto` (persisted for the next session), with `--mode ask|auto` for this invocation, or with `io config set mode ask|auto`. The mode and rule list are captured in memory when the session starts; editing `config.json` during a session does not change the active policy until an explicit `/reload`. A read-only subagent never inherits `auto` and rejects writes and shell metacharacters. A command blocked without any way to ask the user is reported to the model and to the transcript instead of failing silently.
 
 Environment variables:
 
@@ -310,16 +348,22 @@ Environment variables:
 
 ## Security
 
-- Every command the model runs is displayed in the transcript.
-- A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires an explicit approval choice, defaulting to deny.
-- `permissions` rules can pre-approve or deny commands; built-in denies for `.env` and `auth.json` cannot be overridden.
+See [SECURITY.md](SECURITY.md) for the threat model and reporting process.
+
+IO runs commands as your user, in your shell. The permission layer is a **speed bump for mistakes and a visibility aid, not a sandbox**. Treat prompt injection and untrusted repositories accordingly.
+
+- Every command is shown in the tool panel. With `verbosity low` the panel is hidden; use `/verbosity normal` or `high` when you need to audit commands.
+- A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires an explicit approval choice, defaulting to deny. Quoting and escape variants are canonicalized before matching, but shell parsing is not complete.
+- `permissions` rules can pre-approve or deny commands; built-in denies for credential files (`auth.json`, `.env*`, SSH private keys, cloud credentials) cannot be overridden.
+- Permission state is session-local. Rewriting `config.json` does not change the active policy; a new io process or an explicit `/reload` reads it again, so `config.json` is not a security boundary.
 - Denied commands are reported to the model and are not executed.
 - Failed commands leave a `✖ <tool> failed (exit N)` notice in the transcript, and the terminal status switches to error instead of done.
 - Running commands are cancelled through the SDK's abort signal on `Esc` or `Ctrl+C`.
-- `OPENCODE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, and environment variables referenced by `models.json` credentials are removed from the environment inherited by Bash commands.
+- `OPENCODE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, the AWS credential chain variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, and related file pointers), and environment variables referenced by `models.json` credentials are removed from the environment inherited by commands. Other ambient variables (for example `GH_TOKEN` or `SSH_AUTH_SOCK`) remain visible; do not export long-lived secrets into the environment that runs io.
 - IO loads `AGENTS.md`/`CLAUDE.md` and `.agents/skills` as project context when enabled; disable them with `io config set contextFiles off` and `io config set skills off`.
 - Pi extensions, prompt templates, and MCP servers are not loaded.
-- Provider credentials are never written to logs or committed.
+- Provider credentials are not written by IO itself, but command output and session files can contain anything a command prints. `/debug` writes a transcript snapshot; review it before sharing.
+- Session files are created and repaired with owner-only (`0600`) permissions; the data directory itself is `0700`.
 
 ## Development
 
@@ -327,14 +371,15 @@ Environment variables:
 npm ci --ignore-scripts
 npm run typecheck
 npm test
+npm run test:coverage
 npm run build
 npm run test:smoke
 npm start
 ```
 
-Tests use the Pi SDK faux provider and do not require production credentials or network access.
+Tests use the Pi SDK faux provider and do not require production credentials or network access. CI publishes a coverage report and enforces minimums of 80 % lines, 70 % branches, and 70 % functions.
 
-The production build bundles the CLI with esbuild. This reduced warm interactive startup from roughly 1.06 s to 0.50 s and the installed payload from a 158 MB `node_modules` tree to a 14 MB `dist`. See [docs/performance.md](docs/performance.md) for measurements and methodology.
+The production build bundles the CLI with esbuild. This reduced the installed payload from a 158 MB `node_modules` tree to a roughly 15 MB `dist`; the current warm interactive startup is about 0.60 s. See [docs/performance.md](docs/performance.md) for measurements and methodology.
 
 Project layout:
 

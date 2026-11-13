@@ -4,6 +4,7 @@ import {
 	assessCommand,
 	decideShellPermission,
 	isDangerousCommand,
+	isReadonlyCommand,
 	sanitizeBashEnvironment,
 	shellPatternFor,
 	wildcardMatch,
@@ -63,12 +64,18 @@ test("provider API keys are removed from bash environments", () => {
 	const env = sanitizeBashEnvironment({
 		OPENCODE_API_KEY: "secret",
 		AWS_BEARER_TOKEN_BEDROCK: "secret2",
+		AWS_ACCESS_KEY_ID: "aws-id",
+		AWS_SECRET_ACCESS_KEY: "aws-secret",
+		AWS_SESSION_TOKEN: "aws-token",
 		FIFTYX_API_KEY: "secret3",
 		PATH: "/usr/bin",
 		HOME: "/home/user",
 	}, ["FIFTYX_API_KEY"]);
 	assert.equal(env.OPENCODE_API_KEY, undefined);
 	assert.equal(env.AWS_BEARER_TOKEN_BEDROCK, undefined);
+	assert.equal(env.AWS_ACCESS_KEY_ID, undefined);
+	assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+	assert.equal(env.AWS_SESSION_TOKEN, undefined);
 	assert.equal(env.FIFTYX_API_KEY, undefined);
 	assert.equal(env.PATH, "/usr/bin");
 	assert.equal(env.HOME, "/home/user");
@@ -112,6 +119,36 @@ test("allow rules can pre-approve otherwise dangerous commands", () => {
 	assert.equal(shellPatternFor("rm -rf build"), "rm -rf build");
 });
 
+
+test("quoted and escaped destructive commands are normalized", () => {
+	for (const command of [
+		'bash -c "rm -rf /tmp/example"',
+		"\\rm -rf /tmp/example",
+		"r\\m -rf /tmp/example",
+		"git push origin +main",
+	]) {
+		assert.equal(isDangerousCommand(command), true, command);
+	}
+	assert.equal(decideShellPermission([], 'cat ".env"').decision, "deny");
+	assert.equal(decideShellPermission([], "cat .env.local").decision, "deny");
+	assert.equal(decideShellPermission([], "cat .environment").decision, "allow");
+});
+
+test("readonly policy rejects writes and shell metacharacters", () => {
+	for (const command of ["cat file", "rg -n foo src", "git diff --stat", "find . -name '*.ts'"]) {
+		assert.equal(isReadonlyCommand(command), true, command);
+	}
+	for (const command of [
+		"echo x > file",
+		"cat file | head",
+		"find . -delete",
+		"git diff --output=patch.txt",
+		"python3 -c 'open(\"x\", \"w\")'",
+		"cat $(pwd)",
+	]) {
+		assert.equal(isReadonlyCommand(command), false, command);
+	}
+});
 
 test("auto mode runs risky commands but keeps explicit and built-in denies", () => {
 	const credentialFile = ".env";

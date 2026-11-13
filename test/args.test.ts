@@ -75,6 +75,19 @@ test("invalid arguments report errors", () => {
 	assert.match(parseArgs(["models", "a", "b"]).error ?? "", /unexpected argument/);
 });
 
+test("sessions prune parses an age and an explicit confirmation", () => {
+	assert.deepEqual(parseArgs(["sessions", "prune"]).command, {
+		kind: "sessions",
+		prune: { olderThanDays: 30, yes: false },
+	});
+	assert.deepEqual(parseArgs(["sessions", "prune", "--older-than", "7", "--yes"]).command, {
+		kind: "sessions",
+		prune: { olderThanDays: 7, yes: true },
+	});
+	assert.match(parseArgs(["sessions", "prune", "--older-than", "nope"]).error ?? "", /positive number/);
+	assert.match(parseArgs(["sessions", "prune", "--wat"]).error ?? "", /unknown option/);
+});
+
 test("run accepts a prompt and session options", () => {
 	assert.deepEqual(parseArgs(["run", "explain", "this", "repo"]).command, {
 		kind: "run",
@@ -102,4 +115,44 @@ test("run rejects conflicting or unknown options", () => {
 	assert.match(parseArgs(["run", "--wat", "hello"]).error ?? "", /unknown option/);
 	assert.match(parseArgs(["run", "--session"]).error ?? "", /requires a value/);
 	assert.match(parseArgs(["run", "-c", "--session", "x"]).error ?? "", /cannot be used together/);
+});
+
+test("run treats everything after the prompt as prompt text", () => {
+	assert.deepEqual(parseArgs(["run", "explain", "--help"]).command, {
+		kind: "run",
+		continueSession: false,
+		prompt: "explain --help",
+	});
+	assert.deepEqual(parseArgs(["run", "what", "is", "-c"]).command, {
+		kind: "run",
+		continueSession: false,
+		prompt: "what is -c",
+	});
+	assert.deepEqual(parseArgs(["run", "--", "--help"]).command, {
+		kind: "run",
+		continueSession: false,
+		prompt: "--help",
+	});
+});
+
+test("run parses headless and permission flags", () => {
+	assert.deepEqual(
+		parseArgs(["run", "--mode", "auto", "--no-stdin", "--no-save", "--stats", "--fail-on-tool-error", "hello"]).command,
+		{
+			kind: "run",
+			continueSession: false,
+			prompt: "hello",
+			permissionMode: "auto",
+			readStdin: false,
+			savePreference: false,
+			stats: true,
+			failOnToolError: true,
+		},
+	);
+	assert.match(parseArgs(["run", "--mode", "yolo", "hello"]).error ?? "", /invalid --mode/);
+	assert.deepEqual(parseArgs(["--mode", "ask"]).command, {
+		kind: "interactive",
+		continueSession: false,
+		permissionMode: "ask",
+	});
 });

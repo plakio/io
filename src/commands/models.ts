@@ -46,6 +46,7 @@ export async function runModels(
 	const config = loadConfig(paths).config;
 	const providersToList = provider ? [provider] : available.providers;
 	let printedAny = false;
+	let modelNumber = 0;
 	const allModels = providersToList.flatMap((providerId) =>
 		available.models.filter((model) => model.provider === providerId),
 	);
@@ -63,11 +64,12 @@ export async function runModels(
 		process.stdout.write(`\n${providerDisplayName(runtime, providerId)} (${providerId})\n`);
 		const idWidth = Math.max(...models.map((model) => model.id.length), 4);
 		for (const model of models) {
+			modelNumber += 1;
 			const preferred =
 				config.provider === model.provider && config.model === model.id ? " *" : "  ";
 			const context = model.contextWindow ? `${formatTokens(model.contextWindow)} ctx` : "";
 			process.stdout.write(
-				`  ${model.id.padEnd(idWidth)}${preferred} ${model.name.padEnd(32)} ${context}\n`,
+				`  ${String(modelNumber).padStart(3)}. ${model.id.padEnd(idWidth)}${preferred} ${model.name.padEnd(32)} ${context}\n`,
 			);
 		}
 	}

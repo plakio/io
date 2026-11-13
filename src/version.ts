@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 export const APP_NAME = "io";
 export const APP_TAGLINE = "minimal AI harness by Plak";
 

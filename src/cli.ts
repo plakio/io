@@ -4,13 +4,17 @@ import "./pi-env.js";
 import { parseArgs, HELP_TEXT } from "./args.js";
 import { resolvePaths } from "./config.js";
 import { CliError } from "./errors.js";
+import { markOutputBroken } from "./io-streams.js";
 import { APP_NAME, VERSION } from "./version.js";
 
 // Piping into head/grep is normal Unix usage. Exit quietly when the reader
 // closes the pipe instead of printing an unhandled EPIPE stack trace.
 for (const stream of [process.stdout, process.stderr]) {
 	stream.on("error", (error: NodeJS.ErrnoException) => {
-		if (error.code === "EPIPE") process.exit(0);
+		if (error.code === "EPIPE") {
+			markOutputBroken();
+			return;
+		}
 		throw error;
 	});
 }
@@ -75,6 +79,11 @@ async function run(argv: string[]): Promise<void> {
 					sessionId: command.sessionId,
 					modelRef: command.modelRef,
 					provider: command.provider,
+					permissionMode: command.permissionMode,
+					readStdin: command.readStdin,
+					savePreference: command.savePreference,
+					stats: command.stats,
+					failOnToolError: command.failOnToolError,
 				});
 				process.exitCode = code;
 			} catch (error) {
@@ -96,7 +105,7 @@ async function run(argv: string[]): Promise<void> {
 		}
 		case "sessions": {
 			const { runSessions } = await import("./commands/sessions.js");
-			await runSessions(resolvePaths(), process.cwd());
+			await runSessions(resolvePaths(), process.cwd(), command.prune);
 			return;
 		}
 		case "interactive": {
@@ -111,6 +120,7 @@ async function run(argv: string[]): Promise<void> {
 				sessionId: command.sessionId,
 				modelRef: command.modelRef,
 				provider: command.provider,
+				permissionMode: command.permissionMode,
 			});
 			process.exitCode = code;
 			return;
