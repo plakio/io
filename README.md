@@ -99,6 +99,8 @@ lists its providers after the built-in ones.
           "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
           "name": "DeepSeek V4.1 Flash 1017",
           "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 384000,
           "thinkingLevelMap": {
             "off": null,
             "minimal": "low",
@@ -114,6 +116,10 @@ lists its providers after the built-in ones.
   }
 }
 ```
+
+`contextWindow` and `maxTokens` are not discovered from the endpoint: Pi
+defaults them to 128 000 and 16 384, so a model with a wider window keeps
+compacting at 128k until you declare it here.
 
 `thinkingLevelMap` translates io's thinking levels to provider values. The 50x
 endpoint accepts `low`, `high`, `xhigh`, and `max`; without the map Pi's
@@ -185,7 +191,7 @@ io run -m opencode-go/glm-5.3 "..."    # override the model for this run
 echo "explain this error" | io run     # read the prompt from stdin
 ```
 
-Headless runs write assistant text to stdout. Commands that need confirmation are denied because there is no TUI; add a `permissions` allow rule to pre-approve a command for automation.
+Headless runs write assistant text to stdout. Commands that need confirmation are denied because there is no TUI; add a `permissions` allow rule, or set `"permissionMode": "auto"`, to pre-approve commands for automation.
 
 ### Project context
 
@@ -226,6 +232,7 @@ Pastes are inserted as the actual text. Large pasted content can be reviewed and
 /models          list authenticated models
 /effort [level]  select or set thinking effort
 /verbosity [lvl] set detail: low hides tool panels, high shows thinking and expanded tools
+/mode [ask|auto] shell approval mode: confirm destructive commands, or run them
 /diff [path]     show git status, stat, and patch
 /session         show session details and token usage
 /login           authentication instructions
@@ -252,6 +259,8 @@ io config set provider opencode-go
 io config set model opencode-go/deepseek-v4.1-flash
 io config set thinking high
 io config set verbosity low
+io config set mode auto
+io config set bell off
 io config set skills off
 io config set contextFiles off
 ```
@@ -276,7 +285,20 @@ Shell permissions use the opencode rule shape. Rules match the whole command, th
 }
 ```
 
-In the confirmation overlay, `a` remembers an allow rule. Dangerous commands are stored exactly (`rm -rf build`), while ordinary commands use their first two tokens (`git status *`).
+Approval is a selection, not a keystroke: `↑`/`↓` to choose, `Enter` to confirm, `Esc` to deny. The default choice is **Deny**, so a stray Enter never approves a destructive command, and typing while the prompt is open cannot approve one either. `Always allow` remembers a rule. Dangerous commands are stored exactly (`rm -rf build`), while ordinary commands use their first two tokens (`git status *`).
+
+While a prompt is open IO says so three ways, so a missed prompt cannot pass for a hung session: the spinner becomes `⏸ Waiting for approval (12s): <command>` above the editor, a line in the transcript records the request and its outcome, and the terminal bell rings (again after 30s and 90s) unless `bell` is `false`.
+
+`permissionMode` decides what happens to commands the built-in risk patterns would confirm:
+
+```json
+{ "permissionMode": "auto" }
+```
+
+- `ask` (default) — confirm them.
+- `auto` — run them without confirmation. Built-in denies for credential files still apply, and explicit `deny` rules still win. While it is on, the footer shows a red `AUTO-APPROVE` badge.
+
+Switch it in-session with `/mode ask` or `/mode auto` (persisted), or with `io config set mode ask|auto`. A read-only subagent never inherits `auto`, and a command blocked without any way to ask the user is reported to the model and to the transcript instead of failing silently.
 
 Environment variables:
 
@@ -289,9 +311,10 @@ Environment variables:
 ## Security
 
 - Every command the model runs is displayed in the transcript.
-- A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires explicit `y` confirmation.
+- A conservative set of destructive patterns (recursive deletes, force pushes, hard resets, disk/system commands, remote code piping, privilege escalation) requires an explicit approval choice, defaulting to deny.
 - `permissions` rules can pre-approve or deny commands; built-in denies for `.env` and `auth.json` cannot be overridden.
 - Denied commands are reported to the model and are not executed.
+- Failed commands leave a `✖ <tool> failed (exit N)` notice in the transcript, and the terminal status switches to error instead of done.
 - Running commands are cancelled through the SDK's abort signal on `Esc` or `Ctrl+C`.
 - `OPENCODE_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, and environment variables referenced by `models.json` credentials are removed from the environment inherited by Bash commands.
 - IO loads `AGENTS.md`/`CLAUDE.md` and `.agents/skills` as project context when enabled; disable them with `io config set contextFiles off` and `io config set skills off`.

@@ -42,7 +42,7 @@ Usage:
   io config                   Show or edit configuration interactively
   io config show              Show configuration
   io config edit              Interactive configuration
-  io config set <key> <value> Set provider, model, thinking, verbosity, or context options
+  io config set <key> <value> Set provider, model, thinking, verbosity, mode, or context options
 
 Options:
   -c, --continue              Continue the most recent session here
@@ -58,7 +58,7 @@ Providers:
   amazon-bedrock              Amazon Bedrock (bearer token or AWS credentials)
 
 Session commands:
-  /help  /model  /models  /diff  /session  /login  /quit
+  /help  /model  /models  /mode  /diff  /session  /login  /quit
 
 Keys:
   Enter                       Send prompt

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { listSessions } from "../src/session.js";
+import { saveConfig } from "../src/config.js";
 import { createFauxHarness, temporaryPaths, textEvents, toolResultText } from "./helpers.js";
 
 test("context files and project skills load only when enabled", async () => {
@@ -262,5 +263,52 @@ test("sessions persist and can be continued", async () => {
 		}
 	} finally {
 		first.cleanup();
+	}
+});
+
+test("auto permission mode runs dangerous commands without asking", async () => {
+	const marker = mkdtempSync(join(tmpdir(), "io-auto-"));
+	mkdirSync(marker, { recursive: true });
+	writeFileSync(join(marker, "file.txt"), "x");
+	const temporary = temporaryPaths();
+	saveConfig(temporary.paths, { permissionMode: "auto" });
+	const confirmations: string[] = [];
+	const harness = await createFauxHarness({
+		paths: temporary.paths,
+		confirmCommand: async (request) => {
+			confirmations.push(request.command);
+			return false;
+		},
+	});
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: `rm -rf ${marker}` }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("deleted"),
+		]);
+		await harness.harness.session.prompt("delete the marker");
+		assert.deepEqual(confirmations, []);
+		assert.equal(existsSync(marker), false);
+	} finally {
+		harness.harness.session.dispose();
+		temporary.cleanup();
+		rmSync(marker, { recursive: true, force: true });
+	}
+});
+
+test("commands blocked without an approval channel are reported through notify", async () => {
+	const notices: string[] = [];
+	const harness = await createFauxHarness({ notify: (message) => notices.push(message) });
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "rm -rf /tmp/io-no-channel" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("not run"),
+		]);
+		await harness.harness.session.prompt("try a destructive command");
+		assert.equal(notices.length, 1);
+		assert.match(notices[0] ?? "", /blocked without approval channel/);
+		assert.match(toolResultText(harness.harness), /no way to ask the user for approval/);
+	} finally {
+		harness.harness.session.dispose();
+		harness.cleanup();
 	}
 });

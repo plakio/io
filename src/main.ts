@@ -83,6 +83,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
 			process.stderr.write(`io headless: dangerous command denied: ${command} (${reason})\n`);
 			return false;
 		},
+		notify: (message) => process.stderr.write(`io headless: ${message}\n`),
 		context: contextSettings,
 	});
 
@@ -219,6 +220,7 @@ export async function runInteractive(options: InteractiveOptions): Promise<numbe
 
 	const selected = selection.selection.model;
 	let confirmHandler: ConfirmCommand | undefined;
+	let notifyHandler: ((message: string) => void) | undefined;
 	const harness = await createHarness({
 		cwd: process.cwd(),
 		paths,
@@ -231,6 +233,7 @@ export async function runInteractive(options: InteractiveOptions): Promise<numbe
 			if (!confirmHandler) return false;
 			return confirmHandler(request);
 		},
+		notify: (message) => notifyHandler?.(message),
 		context: contextSettings,
 	});
 
@@ -255,5 +258,6 @@ export async function runInteractive(options: InteractiveOptions): Promise<numbe
 		warnings,
 	});
 	confirmHandler = app.getConfirmCommand();
+	notifyHandler = (message) => app.notify(message);
 	return app.run();
 }

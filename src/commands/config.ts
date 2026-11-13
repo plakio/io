@@ -1,7 +1,9 @@
 import {
+	PERMISSION_MODES,
 	THINKING_LEVELS,
 	VERBOSITY_LEVELS,
 	loadConfig,
+	resolvePermissionMode,
 	saveConfig,
 	type IoConfig,
 	type IoPaths,
@@ -28,6 +30,8 @@ export function runConfigShow(paths: IoPaths): void {
 	process.stdout.write(`model      ${config.model ?? "—"}\n`);
 	process.stdout.write(`thinking   ${config.thinkingLevel ?? "—"}\n`);
 	process.stdout.write(`verbosity  ${config.verbosity ?? "normal"}\n`);
+	process.stdout.write(`mode       ${resolvePermissionMode(config)}\n`);
+	process.stdout.write(`bell       ${config.bell === false ? "off" : "on"}\n`);
 	process.stdout.write(`skills     ${config.skills === false ? "off" : "on"}\n`);
 	process.stdout.write(`context    ${config.contextFiles === false ? "off" : "on"}\n`);
 	process.stdout.write(`config     ${paths.configPath}\n`);
@@ -79,17 +83,27 @@ function updateConfig(
 			}
 			return { ...config, verbosity: value as IoConfig["verbosity"] };
 		}
+		case "mode":
+		case "permissionMode": {
+			if (!(PERMISSION_MODES as readonly string[]).includes(value)) {
+				throw new CliError(`Invalid permission mode "${value}". Use one of: ${PERMISSION_MODES.join(", ")}.`);
+			}
+			return { ...config, permissionMode: value as IoConfig["permissionMode"] };
+		}
 		case "skills":
-		case "contextFiles": {
+		case "contextFiles":
+		case "bell": {
 			const parsed = parseBoolean(value);
 			if (parsed === undefined) {
 				throw new CliError(`Invalid value "${value}" for ${key}. Use on or off.`);
 			}
-			return key === "skills" ? { ...config, skills: parsed } : { ...config, contextFiles: parsed };
+			if (key === "skills") return { ...config, skills: parsed };
+			if (key === "bell") return { ...config, bell: parsed };
+			return { ...config, contextFiles: parsed };
 		}
 		default:
 			throw new CliError(
-				`Unknown config key "${key}". Use provider, model, thinking, verbosity, skills, or contextFiles.`,
+				`Unknown config key "${key}". Use provider, model, thinking, verbosity, mode, skills, contextFiles, or bell.`,
 			);
 	}
 }
@@ -120,7 +134,7 @@ export function runConfigSet(paths: IoPaths, key: string, value: string): void {
 	const next = updateConfig(current, key, value, knownProviders);
 	saveConfig(paths, next);
 	process.stdout.write(`Saved ${paths.configPath}\n`);
-	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · verbosity ${next.verbosity ?? "normal"} · skills ${next.skills === false ? "off" : "on"} · context ${next.contextFiles === false ? "off" : "on"}\n`);
+	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · verbosity ${next.verbosity ?? "normal"} · mode ${resolvePermissionMode(next)} · skills ${next.skills === false ? "off" : "on"} · context ${next.contextFiles === false ? "off" : "on"}\n`);
 }
 
 export async function runConfigInteractive(paths: IoPaths): Promise<void> {

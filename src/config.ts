@@ -11,6 +11,15 @@ export type Verbosity = "low" | "normal" | "high";
 
 export const VERBOSITY_LEVELS: readonly Verbosity[] = ["low", "normal", "high"];
 
+/**
+ * How IO answers its own "run this command?" prompts. `ask` (default) confirms
+ * every command that matches a risky pattern or an explicit `ask` rule. `auto`
+ * skips those confirmations; built-in denies for credential files still apply.
+ */
+export type PermissionMode = "ask" | "auto";
+
+export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto"];
+
 export interface IoConfig {
 	provider?: string;
 	model?: string;
@@ -23,6 +32,10 @@ export interface IoConfig {
 	scopedModels?: string[];
 	/** Shell permission rules (action is always `shell`). Last matching rule wins. */
 	permissions?: ShellPermissionRule[];
+	/** Whether risky commands are confirmed or run automatically. Default `ask`. */
+	permissionMode?: PermissionMode;
+	/** Ring the terminal bell when IO needs your approval. Default true. */
+	bell?: boolean;
 	/** Load AGENTS.md/CLAUDE.md from the cwd and its ancestors. Default true. */
 	contextFiles?: boolean;
 	/** Load skills from ~/.agents/skills and <cwd>/.agents/skills. Default true. */
@@ -95,6 +108,15 @@ function isVerbosity(value: unknown): value is Verbosity {
 	return typeof value === "string" && (VERBOSITY_LEVELS as readonly string[]).includes(value);
 }
 
+export function isPermissionMode(value: unknown): value is PermissionMode {
+	return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
+}
+
+/** Configured permission mode, with the default resolved. */
+export function resolvePermissionMode(config: IoConfig): PermissionMode {
+	return config.permissionMode ?? "ask";
+}
+
 export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[] } {
 	const warnings: string[] = [];
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -154,6 +176,16 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		}
 		if (invalid) warnings.push("ignoring invalid entries in permissions");
 		if (rules.length > 0) config.permissions = rules;
+	}
+	if (isPermissionMode(input.permissionMode)) {
+		config.permissionMode = input.permissionMode;
+	} else if (input.permissionMode !== undefined) {
+		warnings.push("ignoring invalid config value: permissionMode");
+	}
+	if (typeof input.bell === "boolean") {
+		config.bell = input.bell;
+	} else if (input.bell !== undefined) {
+		warnings.push("ignoring invalid config value: bell");
 	}
 	if (typeof input.contextFiles === "boolean") {
 		config.contextFiles = input.contextFiles;

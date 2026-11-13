@@ -111,3 +111,26 @@ test("allow rules can pre-approve otherwise dangerous commands", () => {
 	assert.equal(shellPatternFor("git status --short"), "git status *");
 	assert.equal(shellPatternFor("rm -rf build"), "rm -rf build");
 });
+
+
+test("auto mode runs risky commands but keeps explicit and built-in denies", () => {
+	const credentialFile = ".env";
+	const authFile = "auth.json";
+	assert.equal(decideShellPermission([], "rm -rf /tmp/build", "auto").decision, "allow");
+	assert.equal(decideShellPermission([], "sudo systemctl restart nginx", "auto").decision, "allow");
+	// Built-in denies are never overridable, not even in auto mode.
+	assert.equal(decideShellPermission([], `cat ${credentialFile}`, "auto").decision, "deny");
+	assert.equal(decideShellPermission([], `cat ~/.config/io/${authFile}`, "auto").decision, "deny");
+	// An explicit deny rule still wins.
+	assert.equal(
+		decideShellPermission([{ resource: "rm -rf *", effect: "deny" }], "rm -rf /tmp/build", "auto").decision,
+		"deny",
+	);
+	// An explicit ask rule still asks: rules are more specific than the mode.
+	assert.equal(
+		decideShellPermission([{ resource: "npm publish", effect: "ask" }], "npm publish", "auto").decision,
+		"ask",
+	);
+	// Ordinary commands are unaffected.
+	assert.equal(decideShellPermission([], "git status", "auto").decision, "allow");
+});

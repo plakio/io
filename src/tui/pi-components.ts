@@ -13,6 +13,9 @@ import type { FooterState, ToolResultLike } from "./components.js";
 
 const ASSISTANT_UPDATE_INTERVAL_MS = 50;
 
+/** Bold red footer badge while destructive commands run without confirmation. */
+const AUTO_BADGE = "\x1b[1;31mAUTO-APPROVE\x1b[0m";
+
 /**
  * Pi marks assistant/user messages with iTerm2/FinalTerm prompt zones. IO is
  * not a shell, and Rex already tracks its own blocks, so keep the markers out
@@ -251,8 +254,12 @@ export class Footer implements Component {
 		this.footerData = {
 			getGitBranch: () => this.branch,
 			getExtensionStatuses: () => {
+				const statuses = new Map<string, string>();
 				const status = footerStatusText(this.state);
-				return status ? new Map([["io", status]]) : new Map<string, string>();
+				if (status) statuses.set("io", status);
+				// Auto-approval is a standing risk: keep it visible on every render.
+				if (this.state.permissionMode === "auto") statuses.set("mode", AUTO_BADGE);
+				return statuses;
 			},
 			getAvailableProviderCount: () =>
 				new Set(this.runtime.getAvailableSnapshot().map((model) => model.provider)).size,

@@ -30,8 +30,15 @@ import {
 	ThinkingSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { IoConfig, IoPaths, ThinkingLevel, Verbosity } from "../config.js";
-import { ensureIoDirectories, loadConfig, saveConfig, VERBOSITY_LEVELS } from "../config.js";
+import type { IoConfig, IoPaths, PermissionMode, ThinkingLevel, Verbosity } from "../config.js";
+import {
+	ensureIoDirectories,
+	loadConfig,
+	PERMISSION_MODES,
+	resolvePermissionMode,
+	saveConfig,
+	VERBOSITY_LEVELS,
+} from "../config.js";
 import { shellPatternFor } from "../safety.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
@@ -67,6 +74,7 @@ const HELP = `Commands
   /scope           Select models that Ctrl+P cycles through
   /effort [level]  Select or set thinking effort
   /verbosity [lvl] Set detail: low (hide tools), normal, high (thinking + expanded tools)
+  /mode [ask|auto] Shell approval mode: confirm destructive commands, or run them
   /copy            Copy the last assistant response
   /debug           Write UI/session diagnostics to a log file
   /reload          Reload config, session resources, and model catalogs
@@ -85,7 +93,9 @@ Keys
   Ctrl+C twice      Exit when the prompt is empty
   Ctrl+O            Expand or collapse tool output
   Ctrl+T            Show or hide model reasoning
-  Ctrl+G            Compose in your editor ($EDITOR → micro → nano → vim)`;
+  Ctrl+G            Compose in your editor ($EDITOR → micro → nano → vim)
+
+Approval prompt: ↑/↓ to choose, Enter to confirm, Esc to deny (default is deny).`;
 
 interface IoAppOptions {
 	cwd: string;
@@ -114,6 +124,22 @@ function messageText(message: { content?: unknown }): string {
 		.join("\n");
 }
 
+function toolResultText(result: unknown): string {
+	const content = (result as { content?: unknown } | undefined)?.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((block) => {
+			if (block && typeof block === "object") {
+				const typed = block as { type?: unknown; text?: unknown };
+				if (typed.type === "text" && typeof typed.text === "string") return typed.text;
+			}
+			return "";
+		})
+		.filter((part) => part.length > 0)
+		.join("\n");
+}
+
 export class IoApp {
 	private options: IoAppOptions;
 	private readonly tui: TuiMainScreen;
@@ -124,6 +150,7 @@ export class IoApp {
 	private readonly statusContainer: Container;
 	private statusLoader: Loader | undefined;
 	private statusLoaderMessage: string | undefined;
+	private statusLoaderPaused = false;
 	private overlayDispose: (() => void) | undefined;
 	private session: Harness["session"];
 	private unsubscribe: (() => void) | undefined;
@@ -151,6 +178,13 @@ export class IoApp {
 	private programDone = false;
 	private programError: string | undefined;
 	private awaitingConfirm = false;
+	private awaitingCommand = "";
+	private awaitingSince = 0;
+	private awaitingTimer: NodeJS.Timeout | undefined;
+	private awaitingBellStage = 0;
+	private permissionMode: PermissionMode = "ask";
+	private bell = true;
+	private toolFailures = 0;
 	private lastProgramStatusJson = "";
 	private lastProgress = false;
 	private spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -163,6 +197,8 @@ export class IoApp {
 		this.session = options.harness.session;
 		this.config = { ...options.config };
 		this.verbosity = this.config.verbosity ?? "normal";
+		this.permissionMode = resolvePermissionMode(this.config);
+		this.bell = this.config.bell !== false;
 		this.thinkingVisible = this.verbosity === "high";
 		this.toolOutputExpanded = this.verbosity === "high";
 		const branchNow = getGitBranch(options.cwd);
@@ -261,6 +297,15 @@ export class IoApp {
 				dim: true,
 			});
 		}
+		if (this.permissionMode === "auto") {
+			this.addNotice(
+				"permission mode: auto — destructive shell commands run without confirmation. Built-in deny rules for credential files still apply. Use /mode ask to restore.",
+				{ bold: true },
+			);
+		}
+		if (this.config.bell === false) {
+			this.addNotice("terminal bell disabled (bell: false)", { dim: true });
+		}
 		this.addNotice("type /help for commands", { dim: true });
 	}
 
@@ -285,6 +330,31 @@ export class IoApp {
 		this.addBlock(new NoticeBlock(text, options));
 	}
 
+	/** Notice channel for the session layer (blocked subagent commands, etc.). */
+	notify(message: string): void {
+		this.addNotice(`⚠ ${message}`, { bold: true });
+	}
+
+	/**
+	 * A failed tool call is otherwise only visible inside the tool panel, where
+	 * a retry loop turns into a wall of dim text. Always leave one line behind.
+	 */
+	private reportToolFailure(toolName: string, result: unknown): void {
+		const text = toolResultText(result);
+		const exit = /Command exited with code (\d+)/.exec(text)?.[1];
+		const first = text
+			.split("\n")
+			.map((line) => line.trim())
+			.find((line) => line.length > 0 && !/^Command exited with code \d+$/.test(line));
+		// A blocked command already left an approval record; do not repeat it.
+		if (/denied permission|Blocked by io permissions|no way to ask the user for approval/.test(text)) return;
+		const parts = [`${toolName} failed`];
+		if (exit) parts.push(`(exit ${exit})`);
+		if (first) parts.push(`· ${oneLine(first, 120)}`);
+		this.toolFailures += 1;
+		this.addNotice(`✖ ${parts.join(" ")}`, { bold: true });
+	}
+
 	private handleEvent(event: AgentSessionEvent): void {
 		if (this.exiting) return;
 		switch (event.type) {
@@ -292,6 +362,7 @@ export class IoApp {
 				this.busy = true;
 				this.programDone = false;
 				this.programError = undefined;
+				this.toolFailures = 0;
 				this.status = "generating";
 				this.lastUsage = undefined;
 				this.lastDurationMs = undefined;
@@ -303,6 +374,9 @@ export class IoApp {
 			case "agent_settled":
 				this.busy = false;
 				this.status = undefined;
+				if (this.toolFailures > 0 && !this.programError) {
+					this.programError = this.toolFailures === 1 ? "1 command failed" : `${this.toolFailures} commands failed`;
+				}
 				if (!this.programError) this.programDone = true;
 				this.activeAssistant?.dispose();
 				this.activeAssistant = undefined;
@@ -374,8 +448,8 @@ export class IoApp {
 				const block = this.activeTools.get(event.toolCallId);
 				block?.setResult(event.result, event.isError, event.durationMs);
 				this.activeTools.delete(event.toolCallId);
-				if (event.isError && this.verbosity === "low") {
-					this.addNotice(`tool ${event.toolName} failed; use /verbosity normal to see the output`, { bold: true });
+				if (event.isError) {
+					this.reportToolFailure(event.toolName, event.result);
 				}
 				this.status = this.busy ? "generating" : undefined;
 				this.updateFooterAndTitle();
@@ -431,7 +505,7 @@ export class IoApp {
 		// (they can render as tofu in terminals without an emoji font). The
 		// title is kept for window titlebars and non-Rex terminals.
 		const model = this.session.model ?? this.options.model;
-		const marker = this.busy ? "⏳" : "✓";
+		const marker = this.programError ? "✗" : this.busy ? "⏳" : "✓";
 		const parts = ["io"];
 		if (model) parts.push(`${model.provider}/${model.id}`);
 		const cwd = this.options.cwd;
@@ -502,9 +576,14 @@ export class IoApp {
 		this.updateSpinnerTimer();
 	}
 
-	/** Pi-style braille spinner above the editor while work is in flight. */
+	/**
+	 * Pi-style braille spinner above the editor while work is in flight. While
+	 * IO is blocked on an approval the spinner stops and the line says so: a
+	 * spinning "running shell" is exactly what made a pending prompt look like
+	 * a hung session.
+	 */
 	private updateWorkingIndicator(): void {
-		const active = this.busy || this.session.isStreaming || this.status !== undefined;
+		const active = this.busy || this.session.isStreaming || this.status !== undefined || this.awaitingConfirm;
 		if (!active) {
 			if (!this.statusLoader) return;
 			this.statusLoader.stop();
@@ -514,11 +593,28 @@ export class IoApp {
 			this.tui.requestRender();
 			return;
 		}
-		const message = this.status
-			? this.status.charAt(0).toUpperCase() + this.status.slice(1)
-			: "Working";
+		// Swap the spinner for a static ⏸ when IO is blocked on the user: a
+		// spinning indicator reads as "still working".
+		if (this.statusLoader && this.statusLoaderPaused !== this.awaitingConfirm) {
+			this.statusLoaderPaused = this.awaitingConfirm;
+			this.statusLoader.setIndicator(
+				this.awaitingConfirm ? { frames: ["⏸"], intervalMs: 0 } : { frames: this.spinnerFrames, intervalMs: 80 },
+			);
+		}
+		const message = this.awaitingConfirm
+			? this.awaitingMessage()
+			: this.status
+				? this.status.charAt(0).toUpperCase() + this.status.slice(1)
+				: "Working";
 		if (!this.statusLoader) {
-			this.statusLoader = new Loader(this.tui, piAccent, piMuted, message, { intervalMs: 80 });
+			this.statusLoaderPaused = this.awaitingConfirm;
+			this.statusLoader = new Loader(
+				this.tui,
+				piAccent,
+				piMuted,
+				message,
+				this.awaitingConfirm ? { frames: ["⏸"], intervalMs: 0 } : { intervalMs: 80 },
+			);
 			this.statusLoaderMessage = message;
 			this.statusContainer.addChild(this.statusLoader);
 			this.statusLoader.start();
@@ -528,6 +624,48 @@ export class IoApp {
 			this.statusLoaderMessage = message;
 			this.statusLoader.setMessage(message);
 		}
+	}
+
+	/** Line above the editor while a confirmation is open. */
+	private awaitingMessage(): string {
+		const elapsed = Math.floor((Date.now() - this.awaitingSince) / 1000);
+		const suffix = elapsed >= 5 ? ` (${elapsed}s)` : "";
+		return `Waiting for approval${suffix}: ${oneLine(this.awaitingCommand, 60)} — ↑/↓ then Enter (default: deny)`;
+	}
+
+	private ringBell(): void {
+		if (!this.bell || !process.stdout.isTTY) return;
+		try {
+			process.stdout.write("\x07");
+		} catch {
+			// A closed stdout is handled by the process-level EPIPE guard.
+		}
+	}
+
+	private startAwaitingTimer(): void {
+		this.awaitingSince = Date.now();
+		this.awaitingBellStage = 0;
+		if (this.awaitingTimer !== undefined) clearInterval(this.awaitingTimer);
+		this.awaitingTimer = setInterval(() => {
+			if (!this.awaitingConfirm) return;
+			const elapsed = Date.now() - this.awaitingSince;
+			if (this.awaitingBellStage === 0 && elapsed >= 30_000) {
+				this.awaitingBellStage = 1;
+				this.ringBell();
+			} else if (this.awaitingBellStage === 1 && elapsed >= 90_000) {
+				this.awaitingBellStage = 2;
+				this.ringBell();
+			}
+			this.updateWorkingIndicator();
+			this.tui.requestRender();
+		}, 1000);
+		this.awaitingTimer.unref?.();
+	}
+
+	private stopAwaitingTimer(): void {
+		if (this.awaitingTimer === undefined) return;
+		clearInterval(this.awaitingTimer);
+		this.awaitingTimer = undefined;
 	}
 
 	private toolStatusLabel(toolName: string, _command: string): string {
@@ -559,6 +697,7 @@ export class IoApp {
 			status: this.status,
 			spinner: streaming ? this.spinnerFrames[this.spinnerIndex] : undefined,
 			queued: this.queued,
+			permissionMode: this.permissionMode,
 			totals,
 			cost: stats.cost > 0 ? stats.cost : undefined,
 			cacheHit: promptDenominator > 0 ? (totals.cacheRead / promptDenominator) * 100 : undefined,
@@ -904,6 +1043,24 @@ export class IoApp {
 				this.applyVerbosity(level);
 				return;
 			}
+			case "/mode":
+			case "/permissions":
+				if (!argument) {
+					this.addNotice(
+						[
+							`permission mode: ${this.permissionMode}`,
+							"",
+							"ask   confirm destructive shell commands before running them (default)",
+							"auto  run them without confirmation; built-in denies for credential files still apply",
+							"",
+							"Switch with /mode ask or /mode auto. The choice is saved to config.json; per-command rules stay in `permissions`.",
+						].join("\n"),
+						{ dim: true },
+					);
+					return;
+				}
+				this.applyPermissionMode(argument.trim().toLowerCase());
+				return;
 			case "/copy":
 				this.copyLastAssistant();
 				return;
@@ -958,6 +1115,28 @@ export class IoApp {
 						: "tools collapsed, thinking hidden";
 			this.addNotice(`verbosity: ${level} — ${detail}`, { dim: true });
 		}
+		this.updateFooterAndTitle();
+	}
+
+	private applyPermissionMode(mode: string): void {
+		if (!(PERMISSION_MODES as readonly string[]).includes(mode)) {
+			this.addNotice("usage: /mode [ask|auto]", { bold: true });
+			return;
+		}
+		const next = mode as PermissionMode;
+		this.permissionMode = next;
+		this.config = { ...this.config, permissionMode: next };
+		try {
+			saveConfig(this.options.paths, this.config);
+		} catch (error) {
+			this.addNotice(`could not save permission mode: ${(error as Error).message}`, { bold: true });
+		}
+		this.addNotice(
+			next === "auto"
+				? "permission mode: auto — destructive shell commands run without confirmation. Built-in deny rules still apply. Use /mode ask to restore."
+				: "permission mode: ask — destructive shell commands need your approval.",
+			{ bold: next === "auto" },
+		);
 		this.updateFooterAndTitle();
 	}
 
@@ -1888,13 +2067,24 @@ export class IoApp {
 	private confirmCommand: ConfirmCommand = async ({ command, reason, signal }) => {
 		return new Promise<boolean>((resolve) => {
 			let settled = false;
+			const short = oneLine(command, 90);
+			// The overlay is the prompt; this notice is the record of it, so a
+			// missed overlay still leaves a line saying what was asked and how it ended.
+			const notice = new NoticeBlock(
+				`${style.bold("approval needed")} ${short} ${style.dim(`(${reason})`)}`,
+			);
+			this.addBlock(notice);
 			const finish = (allowed: boolean) => {
 				if (settled) return;
 				settled = true;
 				this.awaitingConfirm = false;
+				this.stopAwaitingTimer();
 				signal?.removeEventListener("abort", onAbort);
+				notice.setText(allowed ? style.dim(`✔ allowed ${short}`) : style.bold(`✖ denied ${short}`));
+				this.status = this.busy ? "generating" : undefined;
 				this.closeOverlay();
 				this.updateFooterAndTitle();
+				this.tui.requestRender();
 				resolve(allowed);
 			};
 			const onAbort = () => finish(false);
@@ -1926,6 +2116,9 @@ export class IoApp {
 				},
 			);
 			this.awaitingConfirm = true;
+			this.awaitingCommand = command;
+			this.startAwaitingTimer();
+			this.ringBell();
 			this.activeOverlay = this.tui.showOverlay(new PaddedBox(overlay), {
 				anchor: "center",
 				width: this.tui.terminal.columns,

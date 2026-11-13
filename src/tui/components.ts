@@ -987,6 +987,8 @@ export interface FooterState {
 	sessionId?: string;
 	busy?: boolean;
 	status?: string;
+	/** `auto` means destructive shell commands run without confirmation. */
+	permissionMode?: "ask" | "auto";
 	/** Current braille frame while busy (Pi Loader frame set). */
 	spinner?: string;
 	queued?: number;
@@ -1063,6 +1065,8 @@ export class ConfirmOverlay implements Component {
 	private readonly done: (allowed: boolean) => void;
 	private readonly cancelGeneration: (() => void) | undefined;
 	private readonly rememberAllow: (() => void) | undefined;
+	private readonly items: Array<{ id: "once" | "always" | "deny"; label: string }>;
+	private selected: number;
 	private finished = false;
 
 	constructor(
@@ -1077,32 +1081,49 @@ export class ConfirmOverlay implements Component {
 		this.done = done;
 		this.cancelGeneration = cancelGeneration;
 		this.rememberAllow = rememberAllow;
+		this.items = [
+			{ id: "once", label: "Allow once" },
+			...(rememberAllow ? [{ id: "always" as const, label: "Always allow this command" }] : []),
+			{ id: "deny", label: "Deny" },
+		];
+		// Default on Deny: a stray Enter (or a typed message that ends with one)
+		// must never approve a destructive command.
+		this.selected = this.items.length - 1;
 	}
 
 	invalidate(): void {}
 
+	/**
+	 * Arrow keys plus Enter only. Bare letters used to approve here, which meant
+	 * any typing while the prompt was focused could allow a destructive command.
+	 */
 	handleInput(data: string): void {
 		if (this.finished) return;
-		if (data === "y" || data === "Y") {
-			this.finished = true;
-			this.done(true);
-			return;
-		}
-		if ((data === "a" || data === "A") && this.rememberAllow) {
-			this.finished = true;
-			this.rememberAllow();
-			this.done(true);
-			return;
-		}
+		const keybindings = getKeybindings();
 		if (matchesKey(data, Key.ctrl("c"))) {
 			this.finished = true;
 			this.cancelGeneration?.();
 			this.done(false);
 			return;
 		}
-		if (data === "n" || data === "N" || matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
+		if (keybindings.matches(data, "tui.select.cancel")) {
 			this.finished = true;
 			this.done(false);
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.up")) {
+			this.selected = (this.selected - 1 + this.items.length) % this.items.length;
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.down")) {
+			this.selected = (this.selected + 1) % this.items.length;
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.confirm") || matchesKey(data, Key.enter)) {
+			const item = this.items[this.selected];
+			this.finished = true;
+			if (item?.id === "always") this.rememberAllow?.();
+			this.done(item?.id !== "deny");
 		}
 	}
 
@@ -1118,11 +1139,14 @@ export class ConfirmOverlay implements Component {
 		lines.push("");
 		lines.push(truncateToWidth(style.dim(`Reason: ${this.reason}`), width, "…"));
 		lines.push("");
-		if (this.rememberAllow) {
-			lines.push(truncateToWidth(style.dim("[y] allow once   [a] always   [n] deny"), width, "…"));
-		} else {
-			lines.push(truncateToWidth(style.dim("[y] allow    [n] deny"), width, "…"));
-		}
+		this.items.forEach((item, index) => {
+			const selected = index === this.selected;
+			const marker = selected ? "›" : " ";
+			const label = `${marker} ${item.label}`;
+			lines.push(truncateToWidth(selected ? style.bold(label) : label, width, "…"));
+		});
+		lines.push("");
+		lines.push(truncateToWidth(style.dim("↑/↓ select · Enter confirm · Esc deny · Ctrl+C cancel run"), width, "…"));
 		lines.push(new DynamicBorder().render(width)[0] ?? "");
 		return lines;
 	}

@@ -20,10 +20,12 @@ export interface SubagentToolOptions {
 	currentModel: Model<Api> | undefined;
 	catalog: AgentCatalog;
 	confirmCommand?: ConfirmCommand;
+	/** Surfaces permission events the subagent cannot show itself. */
+	notify?: (message: string) => void;
 }
 
 export function createSubagentTool(options: SubagentToolOptions): ToolDefinition<typeof subagentSchema, string> {
-	const { cwd, paths, modelRuntime, currentModel, catalog, confirmCommand } = options;
+	const { cwd, paths, modelRuntime, currentModel, catalog, confirmCommand, notify } = options;
 	const subagents = getSubagents(catalog);
 	const names = subagents.map((agent) => agent.id).join(", ");
 
@@ -73,6 +75,9 @@ export function createSubagentTool(options: SubagentToolOptions): ToolDefinition
 				model,
 				systemPrompt: definition.systemPrompt,
 				confirmCommand: readonly ? undefined : confirmCommand,
+				// Read-only subagents never inherit `auto`: destructive commands stay blocked.
+				permissionMode: readonly ? "ask" : undefined,
+				notify,
 				continueSession: false,
 			});
 

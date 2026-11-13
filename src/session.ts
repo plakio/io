@@ -12,8 +12,8 @@ import {
 	type ModelRuntime,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { IoPaths, ThinkingLevel } from "./config.js";
-import { loadConfig } from "./config.js";
+import type { IoPaths, PermissionMode, ThinkingLevel } from "./config.js";
+import { loadConfig, resolvePermissionMode } from "./config.js";
 import { DEFAULT_AGENTS, getAgent, canDelegate, type AgentCatalog, type AgentDefinition } from "./agents.js";
 import { decideShellPermission, sanitizeBashEnvironment } from "./safety.js";
 import { readProviderEnvNames } from "./runtime.js";
@@ -111,6 +111,13 @@ export interface HarnessOptions {
 	sessionId?: string;
 	settingsManager?: SettingsManager;
 	confirmCommand?: ConfirmCommand;
+	/**
+	 * Overrides the configured permission mode. Read-only agents force `ask`
+	 * so `auto` in the config cannot unlock destructive commands for them.
+	 */
+	permissionMode?: PermissionMode;
+	/** UI channel for permission events that have no prompt (denials, blocked subagents). */
+	notify?: (message: string) => void;
 	systemPrompt?: string;
 	tools?: ToolDefinition[];
 	agent?: AgentDefinition;
@@ -132,6 +139,9 @@ export interface Harness {
 	agentCatalog: AgentCatalog;
 	/** Resolved context flags, preserved when the harness is replaced (/new, /resume, /fork). */
 	context: { skills: boolean; contextFiles: boolean };
+	/** Permission mode override and notice channel, preserved across harness replacement. */
+	permissionMode?: PermissionMode;
+	notify?: (message: string) => void;
 }
 
 export interface ReplaceHarnessOptions {
@@ -139,6 +149,8 @@ export interface ReplaceHarnessOptions {
 	paths: IoPaths;
 	modelRuntime: ModelRuntime;
 	confirmCommand?: ConfirmCommand;
+	permissionMode?: PermissionMode;
+	notify?: (message: string) => void;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	continueSession?: boolean;
@@ -169,6 +181,8 @@ export async function replaceHarnessSession(
 		model: model as Model<Api>,
 		thinkingLevel,
 		confirmCommand: options.confirmCommand,
+		permissionMode: options.permissionMode ?? current.permissionMode,
+		notify: options.notify ?? current.notify,
 		continueSession: options.continueSession,
 		sessionId: options.sessionId,
 		agentCatalog: current.agentCatalog,
@@ -253,6 +267,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 				currentModel: options.model,
 				catalog,
 				confirmCommand: options.confirmCommand,
+				notify: options.notify,
 			}) as unknown as ToolDefinition,
 		);
 	}
@@ -280,14 +295,18 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 	};
 
 	const confirmCommand = options.confirmCommand;
+	const notify = options.notify;
 	session.agent.beforeToolCall = async (context, signal) => {
 		if (context.toolCall.name !== "bash") return undefined;
 		const command = (context.args as { command?: unknown }).command;
 		if (typeof command !== "string") return undefined;
 		// Read permissions fresh from disk on every check, so an "allow always"
-		// saved by the TUI (or an external edit) applies to THIS session now.
-		const rules = loadConfig(options.paths).config.permissions ?? [];
-		const decision = decideShellPermission(rules, command);
+		// saved by the TUI (or a `/mode` switch, or an external edit) applies to
+		// THIS session now.
+		const config = loadConfig(options.paths).config;
+		const rules = config.permissions ?? [];
+		const mode = options.permissionMode ?? resolvePermissionMode(config);
+		const decision = decideShellPermission(rules, command, mode);
 		if (decision.decision === "deny") {
 			return {
 				block: true,
@@ -295,9 +314,15 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 			};
 		}
 		if (decision.decision === "allow") return undefined;
-		const allowed = confirmCommand
-			? await confirmCommand({ command, reason: decision.reason ?? "destructive command", signal })
-			: false;
+		if (!confirmCommand) {
+			// No TUI to ask: say so out loud instead of denying invisibly.
+			notify?.(`blocked without approval channel: ${command} (${decision.reason ?? "destructive command"})`);
+			return {
+				block: true,
+				reason: `Blocked: this session has no way to ask the user for approval, so "${command}" was not run. Report this to the user and ask them to run it themselves or suggest a safer command.`,
+			};
+		}
+		const allowed = await confirmCommand({ command, reason: decision.reason ?? "destructive command", signal });
 		if (!allowed || signal?.aborted) {
 			return {
 				block: true,
@@ -318,5 +343,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 		agent,
 		agentCatalog: catalog,
 		context: { skills, contextFiles },
+		permissionMode: options.permissionMode,
+		notify: options.notify,
 	};
 }

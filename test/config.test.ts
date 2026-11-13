@@ -7,6 +7,7 @@ import {
 	loadConfig,
 	parseConfig,
 	resolveContextSettings,
+	resolvePermissionMode,
 	resolvePaths,
 	saveConfig,
 	THINKING_LEVELS,
@@ -125,4 +126,21 @@ test("permission rules parse and invalid entries warn", () => {
 	});
 	assert.deepEqual(invalid.config.permissions, undefined);
 	assert.match(invalid.warnings[0] ?? "", /invalid entries in permissions/);
+});
+
+
+test("permissionMode and bell parse, and invalid values warn", () => {
+	assert.equal(parseConfig({ permissionMode: "auto" }).config.permissionMode, "auto");
+	assert.equal(parseConfig({ permissionMode: "ask" }).config.permissionMode, "ask");
+	assert.deepEqual(parseConfig({ permissionMode: "yolo" }), {
+		config: {},
+		warnings: ["ignoring invalid config value: permissionMode"],
+	});
+	assert.equal(parseConfig({ bell: false }).config.bell, false);
+	assert.deepEqual(parseConfig({ bell: "loud" }), {
+		config: {},
+		warnings: ["ignoring invalid config value: bell"],
+	});
+	assert.equal(resolvePermissionMode({}), "ask");
+	assert.equal(resolvePermissionMode({ permissionMode: "auto" }), "auto");
 });

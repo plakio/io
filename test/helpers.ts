@@ -34,6 +34,7 @@ export function temporaryPaths(prefix = "io-test-"): { paths: IoPaths; cleanup: 
 export async function createFauxHarness(options: {
 	cwd?: string;
 	confirmCommand?: ConfirmCommand;
+	notify?: (message: string) => void;
 	continueSession?: boolean;
 	sessionManager?: SessionManager;
 	paths?: IoPaths;
@@ -58,6 +59,7 @@ export async function createFauxHarness(options: {
 		continueSession: options.continueSession,
 		sessionManager: options.sessionManager,
 		confirmCommand: options.confirmCommand,
+		notify: options.notify,
 		context: options.context,
 	});
 	return { faux, runtime, paths, harness, cleanup };

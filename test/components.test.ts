@@ -72,20 +72,40 @@ test("footer stays compact and truncates at narrow widths", () => {
 	assert.ok(visibleWidth(narrow) <= 20);
 });
 
-test("confirmation overlay accepts only explicit allow keys", () => {
+test("confirmation overlay needs an explicit choice and defaults to deny", () => {
 	const decisions: boolean[] = [];
 	const overlay = new ConfirmOverlay("rm -rf /tmp/x", "recursive forced delete", (allowed) => {
 		decisions.push(allowed);
 	});
 	assert.match(overlay.render(80).join("\n"), /Run this command/);
-	overlay.handleInput("n");
-	assert.deepEqual(decisions, [false]);
+	// Typing letters never approves: the prompt is arrow keys + Enter only.
+	for (const key of ["y", "a", "n", "yes", "allow"]) overlay.handleInput(key);
+	assert.deepEqual([...decisions], []);
+	// A stray Enter lands on the default, which is Deny.
+	overlay.handleInput("\r");
+	assert.deepEqual([...decisions], [false]);
 
 	const allow = new ConfirmOverlay("rm -rf /tmp/x", "recursive forced delete", (allowed) => {
 		decisions.push(allowed);
 	});
-	allow.handleInput("y");
-	assert.deepEqual(decisions, [false, true]);
+	// One step up from the default Deny is Allow once.
+	allow.handleInput("\x1b[A");
+	allow.handleInput("\r");
+	assert.deepEqual([...decisions], [false, true]);
+
+	let remembered = 0;
+	const always = new ConfirmOverlay(
+		"rm -rf /tmp/x",
+		"recursive forced delete",
+		() => {},
+		undefined,
+		() => {
+			remembered += 1;
+		},
+	);
+	always.handleInput("\x1b[A");
+	always.handleInput("\r");
+	assert.equal(remembered, 1);
 });
 
 const PICKER_ITEMS = [

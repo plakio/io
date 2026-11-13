@@ -1,4 +1,4 @@
-import type { ShellPermissionRule } from "./config.js";
+import type { PermissionMode, ShellPermissionRule } from "./config.js";
 
 export interface CommandRisk {
 	dangerous: boolean;
@@ -150,9 +150,16 @@ export function matchesBuiltInDeny(command: string): boolean {
 /** Permission decision for one shell command, before the interactive ask. */
 export type ShellDecision = "allow" | "deny" | "ask";
 
+/**
+ * Decide what to do with one shell command. Explicit rules always win over the
+ * mode: a `deny` rule blocks even in `auto`, and an `ask` rule still asks. The
+ * mode only changes what happens to commands that would otherwise ask because
+ * of the built-in risk patterns.
+ */
 export function decideShellPermission(
 	rules: readonly ShellPermissionRule[],
 	command: string,
+	mode: PermissionMode = "ask",
 ): { decision: ShellDecision; rule?: ShellPermissionRule; reason?: string } {
 	// Built-in denies (credentials and secrets) are non-overridable.
 	if (matchesBuiltInDeny(command)) {
@@ -166,7 +173,10 @@ export function decideShellPermission(
 		return { decision: "ask", rule: matched, reason: `permissions rule "${matched.resource}"` };
 	}
 	const risk = assessCommand(command);
-	if (risk.dangerous) return { decision: "ask", reason: risk.reason };
+	if (risk.dangerous) {
+		if (mode === "auto") return { decision: "allow", reason: `${risk.reason} (auto mode)` };
+		return { decision: "ask", reason: risk.reason };
+	}
 	return { decision: "allow" };
 }
 
