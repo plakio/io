@@ -1,6 +1,6 @@
 # Performance
 
-Measured for IO `0.1.18` on 2026-11-13. These numbers describe the built
+Measured for IO `0.1.18` on 2026-11-13; the 0.1.19 patch only changes TUI rendering after the external editor and test coverage. These numbers describe the built
 application on the host below; they are not a comparison with other tools.
 
 ## Environment
