@@ -1966,7 +1966,7 @@ export class IoApp {
 			}
 			this.tui.setFocus(this.editor);
 			this.updateFooterAndTitle();
-			this.tui.requestRender();
+			this.tui.requestRender(true);
 		}
 		try {
 			if (code !== 0) {

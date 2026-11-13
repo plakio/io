@@ -80,7 +80,7 @@ test("TUI scope picker opens with an injected catalog", async () => {
 	}
 });
 
-test("TUI keyboard shortcuts, editor, update, and compact", async () => {
+test("TUI keyboard shortcuts", async () => {
 	const harness = await createFauxHarness();
 	const terminal = new FakeTerminal();
 	const app = new IoApp({
@@ -94,8 +94,6 @@ test("TUI keyboard shortcuts, editor, update, and compact", async () => {
 		backgroundRefresh: false,
 		availableModels: async () => modelsFor(harness.faux.getModel()),
 	});
-	const originalEditor = process.env.EDITOR;
-	const originalFetch = globalThis.fetch;
 	try {
 		const running = app.run();
 		await waitFor(() => terminal.text.includes("type /help"), "initial render");
@@ -113,10 +111,61 @@ test("TUI keyboard shortcuts, editor, update, and compact", async () => {
 		terminal.feedInput("\x14");
 		await waitFor(() => /thinking hidden/i.test(terminal.text), "thinking hidden");
 
-		process.env.EDITOR = "true";
+		submitCommand(terminal, "/quit");
+		assert.equal(await running, 0);
+	} finally {
+		if (!terminal.stopped) app.shutdown(0);
+		harness.cleanup();
+	}
+});
+
+test("TUI opens the external editor", async () => {
+	const harness = await createFauxHarness();
+	const terminal = new FakeTerminal();
+	const app = new IoApp({
+		cwd: process.cwd(),
+		paths: harness.paths,
+		runtime: harness.runtime,
+		harness: harness.harness,
+		model: harness.faux.getModel(),
+		config: {},
+		terminal,
+		backgroundRefresh: false,
+	});
+	const originalEditor = process.env.EDITOR;
+	try {
+		process.env.EDITOR = process.execPath;
+		const running = app.run();
+		await waitFor(() => terminal.text.includes("type /help"), "initial render");
 		terminal.feedInput("\x07");
 		await waitFor(() => terminal.text.includes("editor buffer updated"), "external editor");
+		submitCommand(terminal, "/quit");
+		assert.equal(await running, 0);
+	} finally {
+		if (originalEditor === undefined) delete process.env.EDITOR;
+		else process.env.EDITOR = originalEditor;
+		if (!terminal.stopped) app.shutdown(0);
+		harness.cleanup();
+	}
+});
 
+test("TUI checks for updates and compacts", async () => {
+	const harness = await createFauxHarness();
+	const terminal = new FakeTerminal();
+	const app = new IoApp({
+		cwd: process.cwd(),
+		paths: harness.paths,
+		runtime: harness.runtime,
+		harness: harness.harness,
+		model: harness.faux.getModel(),
+		config: {},
+		terminal,
+		backgroundRefresh: false,
+	});
+	const originalFetch = globalThis.fetch;
+	try {
+		const running = app.run();
+		await waitFor(() => terminal.text.includes("type /help"), "initial render");
 		globalThis.fetch = (async () => ({
 			ok: true,
 			status: 200,
@@ -137,8 +186,6 @@ test("TUI keyboard shortcuts, editor, update, and compact", async () => {
 		submitCommand(terminal, "/quit");
 		assert.equal(await running, 0);
 	} finally {
-		if (originalEditor === undefined) delete process.env.EDITOR;
-		else process.env.EDITOR = originalEditor;
 		globalThis.fetch = originalFetch;
 		if (!terminal.stopped) app.shutdown(0);
 		harness.cleanup();
