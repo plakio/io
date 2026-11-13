@@ -6,13 +6,13 @@ The dependency set is permissive and compatible with MIT. This document records 
 
 ## What IO depends on
 
-Direct runtime dependencies, all pinned to the Pi SDK `1.5.0` line:
+Direct runtime dependencies, all pinned to the Pi SDK `1.5.2` line:
 
 | Package | Version | License | Notes |
 | --- | --- | --- | --- |
-| `@earendil-works/pi-coding-agent` | 1.5.0 | MIT | Agent sessions, Bash tool, settings, session storage |
-| `@earendil-works/pi-ai` | 1.5.0 | MIT | Models, providers, credentials, streaming |
-| `@earendil-works/pi-tui` | 1.5.0 | MIT | Terminal components and differential renderer |
+| `@earendil-works/pi-coding-agent` | 1.5.2 | MIT | Agent sessions, Bash tool, settings, session storage |
+| `@earendil-works/pi-ai` | 1.5.2 | MIT | Models, providers, credentials, streaming |
+| `@earendil-works/pi-tui` | 1.5.2 | MIT | Terminal components and differential renderer |
 
 The Pi SDK's upstream license is MIT, copyright (c) 2025 Mario Zechner. The upstream license text is kept in [`LICENSES/pi-MIT.txt`](../LICENSES/pi-MIT.txt). The published npm packages do not include a separate `LICENSE` file, so this copy is used when the build generates notices.
 

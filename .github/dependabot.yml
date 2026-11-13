@@ -9,7 +9,16 @@ updates:
       pi-sdk:
         patterns:
           - "@earendil-works/*"
+    ignore:
+      # @types/node must match the minimum supported runtime (Node 22).
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

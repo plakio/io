@@ -379,7 +379,7 @@ npm start
 
 Tests use the Pi SDK faux provider and do not require production credentials or network access. CI publishes a coverage report and enforces minimums of 80 % lines, 70 % branches, and 70 % functions.
 
-The production build bundles the CLI with esbuild. This reduced the installed payload from a 158 MB `node_modules` tree to a roughly 15 MB `dist`; the current warm interactive startup is about 0.60 s. See [docs/performance.md](docs/performance.md) for measurements and methodology.
+The production build bundles the CLI with esbuild. This reduced the installed payload from a 158 MB `node_modules` tree to a roughly 15 MB `dist`; the current warm interactive startup is about 0.58 s. See [docs/performance.md](docs/performance.md) for measurements and methodology.
 
 Project layout:
 

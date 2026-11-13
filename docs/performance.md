@@ -1,6 +1,6 @@
 # Performance
 
-Measured for IO `0.1.18` on 2026-11-13; the 0.1.19 patch only changes TUI rendering after the external editor and test coverage. These numbers describe the built
+Measured for IO `0.1.20` on 2026-11-13. These numbers describe the built
 application on the host below; they are not a comparison with other tools.
 
 ## Environment
@@ -48,10 +48,10 @@ Warm OS page cache:
 
 | Command | Median | Min | Max | Runs |
 | --- | ---: | ---: | ---: | ---: |
-| `io --version` | 55.9 ms | 54.1 ms | 91.2 ms | 15 |
-| `io --help` | 56.5 ms | 53.1 ms | 61.1 ms | 10 |
-| `io auth status` | 523.2 ms | 500.7 ms | 632.9 ms | 8 |
-| interactive to first frame | 600.0 ms | 581.3 ms | 716.1 ms | 8 |
+| `io --version` | 53.8 ms | 51.1 ms | 55.7 ms | 15 |
+| `io --help` | 53.2 ms | 49.5 ms | 55.2 ms | 10 |
+| `io auth status` | 503.2 ms | 492.2 ms | 515.7 ms | 8 |
+| interactive to first frame | 577.7 ms | 564.1 ms | 609.4 ms | 8 |
 
 The interactive number includes the Pi TUI, model runtime initialization, the
 initial session, and the first footer render. It is expected to be slower than
@@ -62,9 +62,9 @@ the CLI commands.
 Idle resident set size (RSS), after the first frame and one second of
 inactivity:
 
-- Median: **128.3 MB**
-- Min: 127.0 MB
-- Max: 129.5 MB
+- Median: **124.4 MB**
+- Min: 120.8 MB
+- Max: 136.5 MB
 - Runs: 8
 
 This includes Node.js, the bundled Pi SDK, the agent session, and the TUI. It
@@ -79,9 +79,9 @@ Synthetic worst-case assistant rendering:
 | Response size | 17,213 characters |
 | Updates | 250 |
 | Render width | 100 columns |
-| Median per update | 0.59 ms |
-| p95 per update | 0.92 ms |
-| Max per update | 19.21 ms |
+| Median per update | 0.58 ms |
+| p95 per update | 0.90 ms |
+| Max per update | 18.48 ms |
 
 The TUI throttles assistant text updates to 50 ms intervals and coalesces render
 requests. Tool output updates are similarly bounded by the SDK and the render
