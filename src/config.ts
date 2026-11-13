@@ -6,10 +6,17 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/** How much of the agent's internals the transcript shows. */
+export type Verbosity = "low" | "normal" | "high";
+
+export const VERBOSITY_LEVELS: readonly Verbosity[] = ["low", "normal", "high"];
+
 export interface IoConfig {
 	provider?: string;
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
+	/** Transcript detail: low hides tool panels, high shows thinking and expanded tools. */
+	verbosity?: Verbosity;
 	primaryAgent?: string;
 	agents?: Record<string, { model?: string }>;
 	/** `provider/id` refs that Ctrl+P cycles through. Empty/undefined means all. */
@@ -84,6 +91,10 @@ function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
+function isVerbosity(value: unknown): value is Verbosity {
+	return typeof value === "string" && (VERBOSITY_LEVELS as readonly string[]).includes(value);
+}
+
 export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[] } {
 	const warnings: string[] = [];
 	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -105,6 +116,11 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		config.thinkingLevel = input.thinkingLevel;
 	} else if (input.thinkingLevel !== undefined) {
 		warnings.push("ignoring invalid config value: thinkingLevel");
+	}
+	if (isVerbosity(input.verbosity)) {
+		config.verbosity = input.verbosity;
+	} else if (input.verbosity !== undefined) {
+		warnings.push("ignoring invalid config value: verbosity");
 	}
 	if (typeof input.primaryAgent === "string" && input.primaryAgent.length > 0) {
 		config.primaryAgent = input.primaryAgent;

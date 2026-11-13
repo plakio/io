@@ -1,5 +1,6 @@
 import {
 	THINKING_LEVELS,
+	VERBOSITY_LEVELS,
 	loadConfig,
 	saveConfig,
 	type IoConfig,
@@ -26,6 +27,7 @@ export function runConfigShow(paths: IoPaths): void {
 	process.stdout.write(`provider   ${config.provider ?? "—"}\n`);
 	process.stdout.write(`model      ${config.model ?? "—"}\n`);
 	process.stdout.write(`thinking   ${config.thinkingLevel ?? "—"}\n`);
+	process.stdout.write(`verbosity  ${config.verbosity ?? "normal"}\n`);
 	process.stdout.write(`skills     ${config.skills === false ? "off" : "on"}\n`);
 	process.stdout.write(`context    ${config.contextFiles === false ? "off" : "on"}\n`);
 	process.stdout.write(`config     ${paths.configPath}\n`);
@@ -70,6 +72,13 @@ function updateConfig(
 			}
 			return { ...config, thinkingLevel: value as IoConfig["thinkingLevel"] };
 		}
+		case "verbosity":
+		case "verbose": {
+			if (!(VERBOSITY_LEVELS as readonly string[]).includes(value)) {
+				throw new CliError(`Invalid verbosity "${value}". Use one of: ${VERBOSITY_LEVELS.join(", ")}.`);
+			}
+			return { ...config, verbosity: value as IoConfig["verbosity"] };
+		}
 		case "skills":
 		case "contextFiles": {
 			const parsed = parseBoolean(value);
@@ -79,7 +88,9 @@ function updateConfig(
 			return key === "skills" ? { ...config, skills: parsed } : { ...config, contextFiles: parsed };
 		}
 		default:
-			throw new CliError(`Unknown config key "${key}". Use provider, model, thinking, skills, or contextFiles.`);
+			throw new CliError(
+				`Unknown config key "${key}". Use provider, model, thinking, verbosity, skills, or contextFiles.`,
+			);
 	}
 }
 
@@ -109,7 +120,7 @@ export function runConfigSet(paths: IoPaths, key: string, value: string): void {
 	const next = updateConfig(current, key, value, knownProviders);
 	saveConfig(paths, next);
 	process.stdout.write(`Saved ${paths.configPath}\n`);
-	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · skills ${next.skills === false ? "off" : "on"} · context ${next.contextFiles === false ? "off" : "on"}\n`);
+	process.stdout.write(`provider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · verbosity ${next.verbosity ?? "normal"} · skills ${next.skills === false ? "off" : "on"} · context ${next.contextFiles === false ? "off" : "on"}\n`);
 }
 
 export async function runConfigInteractive(paths: IoPaths): Promise<void> {
@@ -124,7 +135,8 @@ export async function runConfigInteractive(paths: IoPaths): Promise<void> {
 		process.stdout.write("Current configuration\n");
 		process.stdout.write(`  provider: ${current.provider ?? "—"}\n`);
 		process.stdout.write(`  model:    ${current.model ?? "—"}\n`);
-		process.stdout.write(`  thinking: ${current.thinkingLevel ?? "—"}\n\n`);
+		process.stdout.write(`  thinking: ${current.thinkingLevel ?? "—"}\n`);
+		process.stdout.write(`  verbosity: ${current.verbosity ?? "normal"}\n\n`);
 
 		const statuses = await getProviderStatuses(runtime);
 		const providerOptions = statuses.map((status) => {
@@ -167,7 +179,7 @@ export async function runConfigInteractive(paths: IoPaths): Promise<void> {
 		else delete next.model;
 		saveConfig(paths, next);
 		process.stdout.write(
-			`\nSaved ${paths.configPath}\nprovider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"}\n`,
+			`\nSaved ${paths.configPath}\nprovider ${next.provider ?? "—"} · model ${next.model ?? "—"} · thinking ${next.thinkingLevel ?? "—"} · verbosity ${next.verbosity ?? "normal"}\n`,
 		);
 	} catch (error) {
 		if (error instanceof Error && /cancelled|canceled/i.test(error.message)) {

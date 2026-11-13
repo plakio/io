@@ -10,6 +10,7 @@ import {
 	resolvePaths,
 	saveConfig,
 	THINKING_LEVELS,
+	VERBOSITY_LEVELS,
 } from "../src/config.js";
 
 function tempRoot(): string {
@@ -52,16 +53,27 @@ test("all supported thinking levels parse", () => {
 	}
 });
 
+test("verbosity parses and rejects unknown levels", () => {
+	for (const level of VERBOSITY_LEVELS) {
+		assert.equal(parseConfig({ verbosity: level }).config.verbosity, level);
+	}
+	assert.deepEqual(parseConfig({ verbosity: "loud" }), {
+		config: {},
+		warnings: ["ignoring invalid config value: verbosity"],
+	});
+});
+
 test("saveConfig and loadConfig round-trip with owner-only permissions", () => {
 	const root = tempRoot();
 	try {
 		const paths = resolvePaths({ IO_CONFIG_DIR: join(root, "config"), IO_DATA_DIR: join(root, "data") });
-		saveConfig(paths, { provider: "openai-codex", model: "gpt-6-sol", thinkingLevel: "low" });
+		saveConfig(paths, { provider: "openai-codex", model: "gpt-6-sol", thinkingLevel: "low", verbosity: "low" });
 		const loaded = loadConfig(paths);
 		assert.deepEqual(loaded.config, {
 			provider: "openai-codex",
 			model: "gpt-6-sol",
 			thinkingLevel: "low",
+			verbosity: "low",
 		});
 		assert.deepEqual(loaded.warnings, []);
 		assert.equal(statSync(paths.configPath).mode & 0o777, 0o600);

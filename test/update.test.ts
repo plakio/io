@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compareVersions, fetchLatestRelease, parseReleaseVersion } from "../src/update.js";
+import { compareVersions, fetchLatestRelease, isHomebrewManaged, parseReleaseVersion } from "../src/update.js";
 
 test("parseReleaseVersion normalizes tags", () => {
 	assert.equal(parseReleaseVersion("v0.1.12"), "0.1.12");
@@ -58,4 +58,20 @@ test("fetchLatestRelease sends a User-Agent", async () => {
 	};
 	await fetchLatestRelease(fetcher as never, { userAgent: "io/0.1.12" });
 	assert.equal(userAgent, "io/0.1.12");
+});
+
+test("isHomebrewManaged detects Cellar entry points", () => {
+	const previous = process.env.IO_BREW_MANAGED;
+	delete process.env.IO_BREW_MANAGED;
+	try {
+		assert.equal(isHomebrewManaged("/home/linuxbrew/.linuxbrew/Cellar/io/0.1.15/libexec/dist/cli.js"), true);
+		assert.equal(isHomebrewManaged("/opt/homebrew/Cellar/io/1.2.3/libexec/dist/cli.js"), true);
+		assert.equal(isHomebrewManaged("/home/oscar/io/dist/cli.js"), false);
+		assert.equal(isHomebrewManaged(undefined), false);
+		process.env.IO_BREW_MANAGED = "1";
+		assert.equal(isHomebrewManaged("/home/oscar/io/dist/cli.js"), true);
+	} finally {
+		if (previous === undefined) delete process.env.IO_BREW_MANAGED;
+		else process.env.IO_BREW_MANAGED = previous;
+	}
 });

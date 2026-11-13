@@ -17,6 +17,7 @@ import {
 	AssistantBlock as PiAssistantBlock,
 	ToolBlock as PiToolBlock,
 	UserBlock as PiUserBlock,
+	footerStatusText,
 } from "../src/tui/pi-components.js";
 import { initPiVisuals } from "../src/tui/pi-theme.js";
 
@@ -256,4 +257,12 @@ test("pi components render user, assistant and bash blocks", () => {
 	const toolRendered = stripTerminalSequences(tool.render(60).join("\n"));
 	assert.match(toolRendered, /\$ echo hola/);
 	assert.match(toolRendered, /hola/);
+});
+
+test("footer status line shows only tok/s", () => {
+	assert.equal(
+		footerStatusText({ busy: true, status: "running shell", speed: "42 tok/s", queued: 2 }),
+		"42 tok/s",
+	);
+	assert.equal(footerStatusText({ busy: true, status: "running shell", queued: 2 }), undefined);
 });

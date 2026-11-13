@@ -42,7 +42,7 @@ Usage:
   io config                   Show or edit configuration interactively
   io config show              Show configuration
   io config edit              Interactive configuration
-  io config set <key> <value> Set provider, model, thinking, or context options
+  io config set <key> <value> Set provider, model, thinking, verbosity, or context options
 
 Options:
   -c, --continue              Continue the most recent session here

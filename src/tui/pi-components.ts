@@ -203,6 +203,38 @@ export class ToolBlock implements Component {
 }
 
 /**
+ * Transcript wrapper that owns the blank line before a tool panel. Hiding the
+ * whole entry (low verbosity) also hides that separator, so no gaps remain.
+ */
+export class ToolEntry implements Component {
+	private visible = true;
+
+	constructor(
+		private readonly block: ToolBlock,
+		private readonly spaced: boolean,
+	) {}
+
+	setVisible(visible: boolean): void {
+		this.visible = visible;
+	}
+
+	invalidate(): void {
+		this.block.invalidate();
+	}
+
+	render(width: number): string[] {
+		if (!this.visible) return [];
+		const lines = this.block.render(width);
+		return this.spaced ? ["", ...lines] : lines;
+	}
+}
+
+/** Tokens per second on Pi's extension-status footer line. */
+export function footerStatusText(state: FooterState): string | undefined {
+	return state.speed;
+}
+
+/**
  * Pi's built-in footer: cwd + git branch on one line, token/context/cost and
  * model + thinking level on the next. IO's branch check is throttled by the
  * app; everything else comes from the session.
@@ -212,12 +244,16 @@ export class Footer implements Component {
 	private readonly runtime: ModelRuntime;
 	private readonly footerData: ReadonlyFooterDataProvider;
 	private branch: string | null = null;
+	private state: FooterState = {};
 
 	constructor(session: AgentSession, runtime: ModelRuntime) {
 		this.runtime = runtime;
 		this.footerData = {
 			getGitBranch: () => this.branch,
-			getExtensionStatuses: () => new Map<string, string>(),
+			getExtensionStatuses: () => {
+				const status = footerStatusText(this.state);
+				return status ? new Map([["io", status]]) : new Map<string, string>();
+			},
 			getAvailableProviderCount: () =>
 				new Set(this.runtime.getAvailableSnapshot().map((model) => model.provider)).size,
 			onBranchChange: () => () => {},
@@ -231,6 +267,7 @@ export class Footer implements Component {
 
 	setState(state: FooterState): void {
 		this.branch = state.branch ?? null;
+		this.state = state;
 	}
 
 	invalidate(): void {

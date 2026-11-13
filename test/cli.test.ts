@@ -131,6 +131,20 @@ test("invalid config keys are rejected", () => {
 	}
 });
 
+test("config set persists verbosity", () => {
+	const { env, cleanup } = tempEnv();
+	try {
+		assert.equal(run(["config", "set", "verbosity", "low"], env).status, 0);
+		const show = run(["config", "show"], env);
+		assert.match(show.stdout, /verbosity\s+low/);
+		const invalid = run(["config", "set", "verbosity", "loud"], env);
+		assert.equal(invalid.status, 1);
+		assert.match(invalid.stderr, /Invalid verbosity/);
+	} finally {
+		cleanup();
+	}
+});
+
 test("config set toggles skills and context files", () => {
 	const { env, cleanup } = tempEnv();
 	try {

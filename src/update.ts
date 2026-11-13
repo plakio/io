@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+
 export const GITHUB_REPOSITORY = "plakio/io";
 export const RELEASES_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest`;
 
@@ -8,6 +10,21 @@ export interface ReleaseInfo {
 	tag: string;
 	publishedAt?: string;
 	htmlUrl?: string;
+}
+
+/** True when the running entry point lives inside a Homebrew Cellar for io. */
+export function isHomebrewManaged(entryPoint: string | undefined = process.argv[1]): boolean {
+	if (process.env.IO_BREW_MANAGED === "1") return true;
+	if (!entryPoint) return false;
+	let resolved = entryPoint;
+	try {
+		resolved = realpathSync(entryPoint);
+	} catch {
+		// Tests and unusual launchers may pass a path that does not exist.
+	}
+	if (/[\\/]Cellar[\\/]io[\\/]/i.test(resolved)) return true;
+	const prefix = process.env.HOMEBREW_PREFIX;
+	return typeof prefix === "string" && prefix.length > 0 && resolved.startsWith(`${prefix}/Cellar/io/`);
 }
 
 type FetchFn = (

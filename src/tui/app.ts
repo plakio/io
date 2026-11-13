@@ -30,14 +30,14 @@ import {
 	ThinkingSelectorComponent,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionEvent, ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { IoConfig, IoPaths, ThinkingLevel } from "../config.js";
-import { ensureIoDirectories, loadConfig, saveConfig } from "../config.js";
+import type { IoConfig, IoPaths, ThinkingLevel, Verbosity } from "../config.js";
+import { ensureIoDirectories, loadConfig, saveConfig, VERBOSITY_LEVELS } from "../config.js";
 import { shellPatternFor } from "../safety.js";
 import { formatContext, formatCount, formatSpeed, formatTokens, oneLine, shortSessionId } from "../format.js";
 import { getGitDiff } from "../git-diff.js";
 import { modelReference, parseModelReference, providerName } from "../providers.js";
 import { refreshCatalogs, loadAvailableModels, reloadModelsJson } from "../runtime.js";
-import { GITHUB_REPOSITORY, compareVersions, fetchLatestRelease } from "../update.js";
+import { GITHUB_REPOSITORY, compareVersions, fetchLatestRelease, isHomebrewManaged } from "../update.js";
 import {
 	replaceHarnessSession,
 	type ConfirmCommand,
@@ -55,7 +55,7 @@ import {
 	modelSearchText,
 } from "./components.js";
 import { IoEditor } from "./editor.js";
-import { AssistantBlock, Footer, ToolBlock, UserBlock } from "./pi-components.js";
+import { AssistantBlock, Footer, ToolBlock, ToolEntry, UserBlock } from "./pi-components.js";
 import { initPiVisuals, piAccent, piEditorTheme, piMuted } from "./pi-theme.js";
 import { selectListTheme, style } from "./theme.js";
 
@@ -66,10 +66,11 @@ const HELP = `Commands
   /models          List authenticated models
   /scope           Select models that Ctrl+P cycles through
   /effort [level]  Select or set thinking effort
+  /verbosity [lvl] Set detail: low (hide tools), normal, high (thinking + expanded tools)
   /copy            Copy the last assistant response
   /debug           Write UI/session diagnostics to a log file
   /reload          Reload config, session resources, and model catalogs
-  /update          Check for a newer io release
+  /update          Install the latest io release with Homebrew
   /editor          Compose the prompt in $EDITOR
   /diff [path]     Show git status, stat, and patch
   /session         Show session details and token usage
@@ -133,19 +134,17 @@ export class IoApp {
 	private queued = 0;
 	private lastUsage: Usage | undefined;
 	private lastDurationMs: number | undefined;
-	private toolBlocks: ToolBlock[] = [];
+	private toolEntries: Array<{ block: ToolBlock; entry: ToolEntry; pinned: boolean }> = [];
 	private activeTools = new Map<string, ToolBlock>();
 	private activeAssistant: AssistantBlock | undefined;
 	private activeOverlay: OverlayHandle | undefined;
 	private toolOutputExpanded = false;
-	private activity = { commands: 0, edits: 0, reads: 0, thoughts: 0, subagents: 0 };
-	private thinkingCounts = new Map<number, number>();
-	private activeAssistantIndex = -1;
 	private cwdLabel = "";
 	private branch: string | undefined;
 	private lastBranchCheck = 0;
 	private lastCtrlC = 0;
 	private config: IoConfig;
+	private verbosity: Verbosity = "normal";
 	private thinkingVisible = false;
 	private assistantBlocks: AssistantBlock[] = [];
 	private lastAssistantText = "";
@@ -163,6 +162,9 @@ export class IoApp {
 		this.options = options;
 		this.session = options.harness.session;
 		this.config = { ...options.config };
+		this.verbosity = this.config.verbosity ?? "normal";
+		this.thinkingVisible = this.verbosity === "high";
+		this.toolOutputExpanded = this.verbosity === "high";
 		const branchNow = getGitBranch(options.cwd);
 		this.branch = branchNow;
 		this.cwdLabel = formatCwdForFooter(options.cwd, homedir());
@@ -270,6 +272,15 @@ export class IoApp {
 		this.tui.requestRender();
 	}
 
+	private addToolEntry(block: ToolBlock, options: { pinned?: boolean } = {}): ToolEntry {
+		const entry = new ToolEntry(block, this.transcript.children.length > 0);
+		entry.setVisible(this.verbosity !== "low" || options.pinned === true);
+		this.transcript.addChild(entry);
+		this.toolEntries.push({ block, entry, pinned: options.pinned === true });
+		this.tui.requestRender();
+		return entry;
+	}
+
 	private addNotice(text: string, options: { dim?: boolean; bold?: boolean } = {}): void {
 		this.addBlock(new NoticeBlock(text, options));
 	}
@@ -307,16 +318,12 @@ export class IoApp {
 					block.setThinkingVisible(this.thinkingVisible);
 					this.addBlock(block);
 					this.activeAssistant = block;
-					this.activeAssistantIndex = this.assistantBlocks.length;
 					this.assistantBlocks.push(block);
 				}
 				break;
 			case "message_update":
 				if (event.message.role === "assistant" && this.activeAssistant) {
 					this.activeAssistant.setMessage(event.message, true);
-					if (this.updateThinkingCount(event.message as AssistantMessage)) {
-						this.updateFooter();
-					}
 				}
 				break;
 			case "message_end":
@@ -324,8 +331,6 @@ export class IoApp {
 					const assistant = event.message as AssistantMessage;
 					this.activeAssistant?.setMessage(assistant, false);
 					this.activeAssistant = undefined;
-					this.updateThinkingCount(assistant);
-					this.activeAssistantIndex = -1;
 					const response = messageText(event.message).trim();
 					if (response.length > 0) this.lastAssistantText = response;
 					if (assistant.usage) {
@@ -353,12 +358,11 @@ export class IoApp {
 					ui: this.tui,
 					toolDefinition: this.options.harness.tools.find((tool) => tool.name === event.toolName),
 				});
+				block.setExpanded(this.toolOutputExpanded);
 				block.markStarted();
-				this.toolBlocks.push(block);
+				this.addToolEntry(block);
 				this.activeTools.set(event.toolCallId, block);
-				this.bumpActivity(event.toolName);
 				this.status = this.toolStatusLabel(event.toolName, command);
-				this.addBlock(block);
 				this.updateFooterAndTitle();
 				break;
 			}
@@ -370,6 +374,9 @@ export class IoApp {
 				const block = this.activeTools.get(event.toolCallId);
 				block?.setResult(event.result, event.isError, event.durationMs);
 				this.activeTools.delete(event.toolCallId);
+				if (event.isError && this.verbosity === "low") {
+					this.addNotice(`tool ${event.toolName} failed; use /verbosity normal to see the output`, { bold: true });
+				}
 				this.status = this.busy ? "generating" : undefined;
 				this.updateFooterAndTitle();
 				break;
@@ -523,37 +530,6 @@ export class IoApp {
 		}
 	}
 
-	private updateThinkingCount(message: AssistantMessage): boolean {
-		const index = this.activeAssistantIndex;
-		if (index < 0) return false;
-		const count = message.content.filter((block) => block.type === "thinking").length;
-		const previous = this.thinkingCounts.get(index) ?? 0;
-		if (count === previous) return false;
-		this.thinkingCounts.set(index, count);
-		this.activity.thoughts += count - previous;
-		return true;
-	}
-
-	private bumpActivity(toolName: string): void {
-		if (toolName === "bash" || toolName.includes("shell")) {
-			this.activity.commands += 1;
-		} else if (toolName === "edit" || toolName === "write" || toolName === "apply_patch") {
-			this.activity.edits += 1;
-		} else if (
-			toolName === "read" ||
-			toolName === "grep" ||
-			toolName === "glob" ||
-			toolName === "ls" ||
-			toolName === "find" ||
-			toolName === "cat" ||
-			toolName === "search"
-		) {
-			this.activity.reads += 1;
-		} else if (toolName === "subagent") {
-			this.activity.subagents += 1;
-		}
-	}
-
 	private toolStatusLabel(toolName: string, _command: string): string {
 		if (toolName === "bash" || toolName.includes("shell")) return "running shell";
 		if (toolName === "subagent") return "running subagent";
@@ -586,7 +562,6 @@ export class IoApp {
 			totals,
 			cost: stats.cost > 0 ? stats.cost : undefined,
 			cacheHit: promptDenominator > 0 ? (totals.cacheRead / promptDenominator) * 100 : undefined,
-			activity: { ...this.activity },
 		});
 		this.tui.requestRender();
 	}
@@ -696,7 +671,7 @@ export class IoApp {
 		if (matchesKey(data, Key.ctrl("o"))) {
 			if (this.activeOverlay) return undefined;
 			this.toolOutputExpanded = !this.toolOutputExpanded;
-			for (const block of this.toolBlocks) block.setExpanded(this.toolOutputExpanded);
+			for (const { block } of this.toolEntries) block.setExpanded(this.toolOutputExpanded);
 			this.status = this.toolOutputExpanded ? "tool output expanded" : "tool output collapsed";
 			this.updateFooterAndTitle();
 			setTimeout(() => {
@@ -743,20 +718,21 @@ export class IoApp {
 	}
 
 	private async sendPrompt(text: string, options: { followUp?: boolean; images?: ImageContent[] } = {}): Promise<void> {
+		// While the agent is streaming, Pi requires an explicit queue behavior.
+		// Always use followUp here so ordinary Enter submissions accumulate
+		// instead of failing (or interrupting) the current turn.
+		const streaming = this.session.isStreaming;
 		const promptOptions = {
-			...(options.followUp ? { streamingBehavior: "followUp" as const } : {}),
+			...(streaming || options.followUp ? { streamingBehavior: "followUp" as const } : {}),
 			...(options.images && options.images.length > 0 ? { images: options.images } : {}),
 		};
 		try {
-			if (this.session.isStreaming) {
-				if (!options.followUp) {
-					this.status = "queued";
-					this.updateFooterAndTitle();
-				}
-				await this.session.prompt(text, promptOptions);
-			} else {
-				await this.session.prompt(text, promptOptions);
+			if (streaming) {
+				this.status = "queued";
+				this.addNotice(`queued: ${oneLine(text, 80)}`, { dim: true });
+				this.updateFooterAndTitle();
 			}
+			await this.session.prompt(text, promptOptions);
 		} catch (error) {
 			this.addNotice(`error: ${(error as Error).message}`, { bold: true });
 			this.status = undefined;
@@ -775,7 +751,7 @@ export class IoApp {
 			return;
 		}
 		if (prompt.trimStart().startsWith("!")) {
-			void this.runInlineShell(prompt.trimStart());
+			void this.runInlineShell(prompt.trimStart(), { pinned: true });
 			return;
 		}
 		const attachments = collectImageAttachments(prompt, this.options.cwd);
@@ -788,19 +764,19 @@ export class IoApp {
 		});
 	}
 
-	private async runInlineShell(text: string): Promise<void> {
+	private async runInlineShell(text: string, options: { status?: string; pinned?: boolean } = {}): Promise<boolean> {
 		if (this.busy || this.session.isStreaming) {
 			this.addNotice("Wait for the current response to finish before running a shell command.", { dim: true });
 			this.editor.setText(text);
-			return;
+			return false;
 		}
 		const excluded = text.startsWith("!!");
 		const command = text.slice(excluded ? 2 : 1).trim();
 		if (command.length === 0) {
 			this.addNotice("usage: `!command` includes output in context, `!!command` does not", { dim: true });
-			return;
+			return false;
 		}
-		this.status = "running shell";
+		this.status = options.status ?? "running shell";
 		this.updateFooterAndTitle();
 		const started = Date.now();
 		const block = new ToolBlock({
@@ -812,8 +788,7 @@ export class IoApp {
 			toolDefinition: this.options.harness.tools.find((tool) => tool.name === "bash"),
 		});
 		block.markStarted();
-		this.toolBlocks.push(block);
-		this.addBlock(block);
+		this.addToolEntry(block, { pinned: options.pinned });
 		let output = "";
 		try {
 			const result = await this.session.executeBash(
@@ -834,9 +809,11 @@ export class IoApp {
 				durationMs,
 			);
 			this.updateFooterAndTitle();
+			return !isError;
 		} catch (error) {
 			block.setResult(undefined, true, Date.now() - started);
 			this.addNotice(`could not run shell command: ${(error as Error).message}`, { bold: true });
+			return false;
 		}
 	}
 
@@ -911,6 +888,22 @@ export class IoApp {
 			case "/diff":
 				await this.showDiff(argument || undefined);
 				return;
+			case "/verbosity": {
+				if (!argument) {
+					this.addNotice(
+						`verbosity: ${this.verbosity} (low | normal | high)\nlow hides tool panels; normal collapses them; high shows thinking and expanded tools.`,
+						{ dim: true },
+					);
+					return;
+				}
+				const level = argument.toLowerCase() as Verbosity;
+				if (!(VERBOSITY_LEVELS as readonly string[]).includes(level)) {
+					this.addNotice("usage: /verbosity [low|normal|high]", { bold: true });
+					return;
+				}
+				this.applyVerbosity(level);
+				return;
+			}
 			case "/copy":
 				this.copyLastAssistant();
 				return;
@@ -934,6 +927,38 @@ export class IoApp {
 			default:
 				this.addNotice(`unknown command: ${command}. Type /help for commands.`, { bold: true });
 		}
+	}
+
+	private applyVerbosity(
+		level: Verbosity,
+		options: { persist?: boolean; announce?: boolean } = {},
+	): void {
+		this.verbosity = level;
+		this.thinkingVisible = level === "high";
+		for (const block of this.assistantBlocks) block.setThinkingVisible(this.thinkingVisible);
+		this.toolOutputExpanded = level === "high";
+		for (const { block, entry, pinned } of this.toolEntries) {
+			block.setExpanded(this.toolOutputExpanded);
+			entry.setVisible(level !== "low" || pinned);
+		}
+		if (options.persist !== false) {
+			this.config = { ...this.config, verbosity: level };
+			try {
+				saveConfig(this.options.paths, this.config);
+			} catch (error) {
+				this.addNotice(`could not save verbosity: ${(error as Error).message}`, { bold: true });
+			}
+		}
+		if (options.announce !== false) {
+			const detail =
+				level === "low"
+					? "tool output hidden"
+					: level === "high"
+						? "thinking visible, tools expanded"
+						: "tools collapsed, thinking hidden";
+			this.addNotice(`verbosity: ${level} — ${detail}`, { dim: true });
+		}
+		this.updateFooterAndTitle();
 	}
 
 	private async showEffortSelector(): Promise<void> {
@@ -1024,6 +1049,7 @@ export class IoApp {
 					{ name: "models", description: "List authenticated models" },
 					{ name: "scope", description: "Select models Ctrl+P cycles through" },
 					{ name: "effort", description: "Select or set thinking effort", argumentHint: "[level]" },
+					{ name: "verbosity", description: "Set transcript detail", argumentHint: "[low|normal|high]" },
 					{ name: "compact", description: "Compact the session context" },
 					{ name: "new", description: "Start a new session" },
 					{ name: "resume", description: "Open another session" },
@@ -1039,7 +1065,7 @@ export class IoApp {
 					{ name: "copy", description: "Copy the last assistant response" },
 					{ name: "debug", description: "Write diagnostics to a log file" },
 					{ name: "reload", description: "Reload config, session resources, and model catalogs" },
-					{ name: "update", description: "Check for a newer io release" },
+					{ name: "update", description: "Install the latest io release with Homebrew" },
 					{ name: "editor", description: "Compose the prompt in $EDITOR" },
 					{ name: "session", description: "Show session details" },
 					{ name: "login", description: "Authentication instructions" },
@@ -1061,7 +1087,7 @@ export class IoApp {
 		this.subscribe();
 		this.updateAgentAutocomplete();
 		this.transcript.clear();
-		this.toolBlocks = [];
+		this.toolEntries = [];
 		this.activeTools.clear();
 		this.activeAssistant = undefined;
 		this.lastUsage = undefined;
@@ -1071,8 +1097,6 @@ export class IoApp {
 		this.programDone = false;
 		this.programError = undefined;
 		this.awaitingConfirm = false;
-		this.activity = { commands: 0, edits: 0, reads: 0, thoughts: 0, subagents: 0 };
-		this.thinkingCounts.clear();
 		this.assistantBlocks = [];
 		this.lastAssistantText = "";
 		this.queued = 0;
@@ -1675,6 +1699,7 @@ export class IoApp {
 				this.addNotice(`warning: ${warning}`, { dim: true });
 			}
 			this.config = reloaded.config;
+			this.applyVerbosity(this.config.verbosity ?? "normal", { persist: false, announce: false });
 			await this.session.reload();
 			this.updateAgentAutocomplete();
 			await reloadModelsJson(this.options.runtime, this.options.paths.modelsPath);
@@ -1699,6 +1724,10 @@ export class IoApp {
 	}
 
 	private async checkForUpdate(): Promise<void> {
+		if (this.busy || this.session.isStreaming) {
+			this.addNotice("Wait for the current response to finish before updating.", { dim: true });
+			return;
+		}
 		this.status = "checking for updates";
 		this.updateFooterAndTitle();
 		try {
@@ -1720,19 +1749,64 @@ export class IoApp {
 			const changelog = latest.htmlUrl
 				? ` Changelog: ${latest.htmlUrl}`
 				: ` Changelog: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${latest.tag}`;
-			if (compareVersions(latest.version, VERSION) > 0) {
+			if (compareVersions(latest.version, VERSION) <= 0) {
+				this.addNotice(`io ${VERSION} is up to date.`, { dim: true });
+				return;
+			}
+			if (!isHomebrewManaged()) {
 				this.addNotice(
-					`io ${latest.version} is available (you're running ${VERSION}). Run \`brew upgrade io\` to update.${changelog}`,
+					`io ${latest.version} is available (you're running ${VERSION}). This build is not Homebrew-managed, so update your checkout or run \`brew upgrade io\`.${changelog}`,
 					{ bold: true },
 				);
+				return;
+			}
+			this.addNotice(`updating io ${VERSION} → ${latest.version} with Homebrew…`, { bold: true });
+			const ok = await this.runInlineShell("!!brew update && brew upgrade io", {
+				status: "updating io",
+				pinned: true,
+			});
+			if (!ok) {
+				this.addNotice("update command failed; see the output above.", { bold: true });
+				return;
+			}
+			const installed = this.readBrewInstalledVersion();
+			if (installed === undefined) {
+				this.addNotice(
+					`Homebrew finished. Restart io to use ${latest.version}; could not verify the installed version.${changelog}`,
+					{ bold: true },
+				);
+			} else if (compareVersions(installed, latest.version) >= 0) {
+				this.addNotice(`io ${installed} installed. Restart io to use the new version.${changelog}`, {
+					bold: true,
+				});
 			} else {
-				this.addNotice(`io ${VERSION} is up to date.`, { dim: true });
+				this.addNotice(
+					`Homebrew finished but the installed version is ${installed} (expected ${latest.version}). Run \`brew upgrade io\` to retry.${changelog}`,
+					{ bold: true },
+				);
 			}
 		} catch (error) {
-			this.addNotice(`could not check for updates: ${(error as Error).message}`, { bold: true });
+			this.addNotice(`could not update: ${(error as Error).message}`, { bold: true });
 		} finally {
 			this.status = this.busy ? "generating" : undefined;
 			this.updateFooterAndTitle();
+		}
+	}
+
+	private readBrewInstalledVersion(): string | undefined {
+		try {
+			const brew = process.env.HOMEBREW_PREFIX
+				? join(process.env.HOMEBREW_PREFIX, "bin", "brew")
+				: "brew";
+			const result = spawnSync(brew, ["list", "--versions", "io"], {
+				encoding: "utf8",
+				timeout: 15_000,
+			});
+			if (result.status !== 0 || typeof result.stdout !== "string") return undefined;
+			const fields = result.stdout.trim().split(/\s+/).filter(Boolean);
+			return fields.at(-1);
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -1780,6 +1854,7 @@ export class IoApp {
 			`cwd        ${this.options.cwd}`,
 			`model      ${model ? modelReference(model as Model<any>) : "—"}`,
 			`thinking   ${this.session.thinkingLevel ?? "—"}`,
+			`verbosity  ${this.verbosity}`,
 			`messages   ${formatCount(stats.totalMessages)} (${stats.userMessages} user, ${stats.assistantMessages} assistant, ${stats.toolResults} tool)`,
 			`tokens     ${formatTokens(stats.tokens.input)} in · ${formatTokens(stats.tokens.output)} out · ${formatTokens(stats.tokens.cacheRead)} cache read`,
 		];

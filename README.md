@@ -25,7 +25,7 @@ There is no MCP integration, plugin marketplace, subagent system, browser automa
 - Automatic context compaction before the model window fills.
 - Configurable shell permissions, plus per-command confirmation in the TUI.
 - Multiline input and large pastes shown as editable text, never `[pasted text]`.
-- Input tokens, output tokens, context usage, and generation speed from actual SDK/provider data.
+- Input tokens, output tokens, context usage, generation speed, and live queue status from actual SDK/provider data.
 - Git change inspection with `/diff`.
 - Dangerous-command confirmation, visible commands, and Ctrl+C/Esc cancellation.
 - Minimal, keyboard-first interface styled with Pi's terminal components (`IO_PI_THEME=light` switches the theme).
@@ -225,6 +225,7 @@ Pastes are inserted as the actual text. Large pasted content can be reviewed and
 /model [ref]     select a model
 /models          list authenticated models
 /effort [level]  select or set thinking effort
+/verbosity [lvl] set detail: low hides tool panels, high shows thinking and expanded tools
 /diff [path]     show git status, stat, and patch
 /session         show session details and token usage
 /login           authentication instructions
@@ -250,13 +251,18 @@ io config edit             # interactive provider, model, and thinking selection
 io config set provider opencode-go
 io config set model opencode-go/deepseek-v4.1-flash
 io config set thinking high
+io config set verbosity low
 io config set skills off
 io config set contextFiles off
 ```
 
 `io models` and `io sessions` are also interactive in a terminal: `io models` can set the default model, and `io sessions` can resume a selected session. Both remain non-interactive when their output is piped.
 
+`/update` checks the latest GitHub release and, when io runs from a Homebrew Cellar, runs `brew update && brew upgrade io` itself, then verifies the installed version with `brew list --versions io`. Restart io afterwards to load the new build.
+
 Configuration lives in `~/.config/io/config.json`. Credentials are never stored there.
+
+`verbosity` controls the transcript: `low` shows assistant text and notices while hiding tool panels, `normal` collapses tool panels and hides reasoning, and `high` shows reasoning plus expanded tool output. Change it in-session with `/verbosity low|normal|high` (persisted) or with `io config set verbosity <level>`.
 
 Shell permissions use the opencode rule shape. Rules match the whole command, the last matching rule wins, and built-in denies for credential files (`.env`, `auth.json`) cannot be overridden:
 
