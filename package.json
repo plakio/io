@@ -1,6 +1,6 @@
 {
   "name": "io",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "A minimal AI coding harness powered by the Pi SDK, built for Plak.",
   "type": "module",
   "private": true,
@@ -15,7 +15,8 @@
     "build": "rm -rf dist && node scripts/collect-licenses.mjs && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outdir=dist --splitting --banner:js=\"import { createRequire as __ioCreateRequire } from 'node:module'; const require = __ioCreateRequire(import.meta.url);\" --log-level=warning && node scripts/generate-pi-runtime.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "node --import tsx --test test/*.test.ts",
-    "test:smoke": "node dist/cli.js --version && node dist/cli.js --help > /dev/null && test -s dist/THIRD_PARTY_NOTICES.txt && ! grep -q 'PACKAGES WITH DECLARED LICENSES' dist/THIRD_PARTY_NOTICES.txt",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-lines=80 --test-coverage-branches=70 --test-coverage-functions=70 test/*.test.ts",
+    "test:smoke": "node scripts/smoke.mjs",
     "bench:render": "node --import tsx scripts/bench-render.ts",
     "start": "tsx src/cli.ts"
   },
