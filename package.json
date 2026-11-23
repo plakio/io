@@ -26,7 +26,7 @@
     "@opencode/plugin": "2.3.2",
     "@opencode/sdk": "2.3.2",
     "@opentui/core": "0.9.7",
-    "effect": "4.1.0"
+    "effect": "4.1.4"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
