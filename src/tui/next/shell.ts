@@ -17,6 +17,7 @@ export interface IoShellTab {
 export interface IoShellFooter {
 	cwd?: string;
 	branch?: string;
+	agent?: string;
 	model?: string;
 	context?: string;
 	tokens?: string;
@@ -503,7 +504,7 @@ export class IoShell {
 
 	private updateFooter(): void {
 		const state = this.footerState;
-		const left = [state.cwd, state.branch, state.model].filter(
+		const left = [state.cwd, state.agent, state.model, state.branch].filter(
 			(value): value is string => typeof value === "string" && value.length > 0,
 		);
 		const wide = this.width >= 120;

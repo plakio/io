@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { getTreeSitterClient, type CliRenderer } from "@opentui/core";
 import { getGitBranchAsync } from "../../git-diff.js";
 import {
@@ -6,13 +7,13 @@ import {
 	type IoAppearanceConfig,
 	type IoPaths,
 	type IoThemePreference,
-} from "../../config.js";
-import { formatCwdForFooter, formatTokens, shortSessionId } from "../../format.js";
+} from "../../config.js";import { formatCwdForFooter, formatTokens, shortSessionId } from "../../format.js";
 import { OpenCodeEngine } from "../../engine/opencode.js";
 import { syncModelsConfig } from "../../engine/models-config.js";
 import { createIoSecurityPlugin, runShellCommand } from "../../engine/shell-plugin.js";
 import type {
 	AgentEngine,
+	EngineAgent,
 	EngineModelRef,
 	EnginePermissionRequest,
 	EngineSession,
@@ -20,11 +21,13 @@ import type {
 	IoEvent,
 } from "../../engine/types.js";
 import { VERSION } from "../../version.js";
+import { IoAgentPicker, selectableAgents } from "./agent-picker.js";
 import { IoAppearance } from "./appearance.js";
 import { IoCommandPalette } from "./command-palette.js";
 import { createIoCommands } from "./commands.js";
 import type { IoCommand } from "./keymap.js";
 import { IoComposer, type IoCompletionItem } from "./composer.js";
+import { IoConnectDialog } from "./connect-dialog.js";
 import { IoDiffViewer } from "./diff-viewer.js";
 import { IoKeymap } from "./keymap.js";
 import { IoModelPicker } from "./model-picker.js";
@@ -39,6 +42,7 @@ export interface IoNextAppOptions {
 	cwd: string;
 	renderer: CliRenderer;
 	engine: AgentEngine;
+	paths?: IoPaths;
 	appearance?: IoAppearanceConfig;
 	sessionID?: string;
 	model?: EngineModelRef;
@@ -50,11 +54,16 @@ const THEMES: readonly IoThemePreference[] = ["io", "io-light", "system", "dark"
 
 const SLASH_COMMANDS: readonly IoCompletionItem[] = [
 	{ value: "/help", description: "Show commands and keys", kind: "command" },
-	{ value: "/model", description: "Select a model", kind: "command" },
+	{ value: "/resume", description: "Resume a previous session", kind: "command" },
+	{ value: "/update", description: "Check for and install io updates", kind: "command" },
+	{ value: "/connect", description: "Connect or remove providers", kind: "command" },
+	{ value: "/agents", description: "List agents and subagents", kind: "command" },
+	{ value: "/agent", description: "Select the primary agent", kind: "command" },
 	{ value: "/models", description: "List available models", kind: "command" },
-	{ value: "/sessions", description: "Resume a session", kind: "command" },
-	{ value: "/resume", description: "Resume a session", kind: "command" },
+	{ value: "/model", description: "Select a model", kind: "command" },
 	{ value: "/new", description: "Start a new session", kind: "command" },
+	{ value: "/continue", description: "Continue the latest session", kind: "command" },
+	{ value: "/cd", description: "Change the working directory", kind: "command" },
 	{ value: "/compact", description: "Compact the context", kind: "command" },
 	{ value: "/diff", description: "Show git changes", kind: "command" },
 	{ value: "/queue", description: "Manage queued prompts", kind: "command" },
@@ -64,10 +73,16 @@ const SLASH_COMMANDS: readonly IoCompletionItem[] = [
 
 const HELP = `Commands
   /help          Show this help
-  /model [ref]   Select a model, optionally by provider/id
+  /resume        Resume a previous session
+  /update        Check for and install io updates
+  /connect       Connect or remove providers
+  /agents        List agents and subagents
+  /agent         Select the primary agent
   /models        List available models
-  /sessions      Resume a session
+  /model [ref]   Select a model, optionally by provider/id
   /new           Start a new session
+  /continue      Continue the latest session
+  /cd [path]     Show or change the working directory
   /compact       Compact the context
   /diff [path]   Show git changes, optionally filtered by path
   /queue         Manage queued prompts
@@ -103,7 +118,10 @@ export class IoNextApp {
 	private session: EngineSession | undefined;
 	private unsubscribe: (() => void) | undefined;
 	private sessionList: readonly EngineSessionSummary[] = [];
+	private agentList: readonly EngineAgent[] = [];
 	private palette: IoCommandPalette | undefined;
+	private agentPicker: IoAgentPicker | undefined;
+	private connectDialog: IoConnectDialog | undefined;
 	private modelPicker: IoModelPicker | undefined;
 	private sessionSwitcher: IoSessionSwitcher | undefined;
 	private diffViewer: IoDiffViewer | undefined;
@@ -163,7 +181,7 @@ export class IoNextApp {
 	}
 
 	async run(): Promise<number> {
-		await this.tabs.refresh(this.session?.id);
+		await this.refreshSessions();
 		return this.exitPromise;
 	}
 
@@ -201,6 +219,8 @@ export class IoNextApp {
 			// Best effort.
 		}
 		this.palette?.dispose();
+		this.agentPicker?.dispose();
+		this.connectDialog?.dispose();
 		this.modelPicker?.dispose();
 		this.sessionSwitcher?.dispose();
 		this.diffViewer?.dispose();
@@ -226,7 +246,11 @@ export class IoNextApp {
 		await getTreeSitterClient()
 			.initialize()
 			.catch(() => undefined);
-		const models = await this.options.engine.listModels();
+		const [models, agents] = await Promise.all([
+			this.options.engine.listModels(),
+			this.options.engine.listAgents(),
+		]);
+		this.agentList = agents;
 		const selected = model ?? (models[0] ? { provider: models[0].provider, id: models[0].id } : undefined);
 		const session = sessionID
 			? await this.options.engine.resumeSession(sessionID)
@@ -262,7 +286,7 @@ export class IoNextApp {
 			this.shell.setFooter({ mode: event.outcome === "succeeded" ? "ready" : event.outcome });
 			if (event.outcome === "failed") this.toast(event.error ?? "turn failed", "error");
 			void this.refreshFooter();
-			void this.tabs.refresh(this.session?.id);
+			void this.refreshSessions();
 			return;
 		}
 		if (event.type === "usage_updated") {
@@ -333,9 +357,27 @@ export class IoNextApp {
 			case "/models":
 				await this.listModels();
 				return;
+			case "/agent":
+				await this.openAgents();
+				return;
+			case "/agents":
+				await this.listAgents();
+				return;
 			case "/sessions":
 			case "/resume":
 				await this.openSessions();
+				return;
+			case "/continue":
+				await this.continueSession();
+				return;
+			case "/update":
+				await this.update();
+				return;
+			case "/connect":
+				await this.openConnect();
+				return;
+			case "/cd":
+				await this.changeDirectory(args[0]);
 				return;
 			case "/new":
 				await this.newSession();
@@ -388,6 +430,79 @@ export class IoNextApp {
 		this.toast(`model ${model.provider}/${model.id}`, "success");
 	}
 
+	private async listAgents(): Promise<void> {
+		if (this.agentList.length === 0) this.agentList = await this.options.engine.listAgents();
+		if (this.agentList.length === 0) {
+			this.transcript.addNotice("no agents available", "warning");
+			return;
+		}
+		const current = this.session?.agent;
+		const lines = this.agentList.map((agent) => {
+			const active = current === agent.id ? "*" : " ";
+			const kind = agent.hidden ? "hidden" : agent.mode;
+			return `${active} ${agent.name} (${agent.id}) · ${kind}${agent.description ? `\n  ${agent.description}` : ""}`;
+		});
+		this.transcript.addNotice(`Agents\n${lines.join("\n")}`, "info");
+	}
+
+	private async openAgents(): Promise<void> {
+		if (this.agentList.length === 0) this.agentList = await this.options.engine.listAgents();
+		const agents = selectableAgents(this.agentList);
+		if (agents.length === 0) {
+			this.toast("no primary agents available", "warning");
+			return;
+		}
+		this.agentPicker?.dispose();
+		this.agentPicker = new IoAgentPicker({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			agents: this.agentList,
+			current: this.session?.agent,
+			onSelect: (agent) => this.applyAgent(agent),
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.keymap.setSuspended(true);
+		this.agentPicker.open();
+	}
+
+	private async applyAgent(agent: EngineAgent): Promise<void> {
+		await this.session?.setAgent(agent.id);
+		await this.refreshFooter();
+		this.toast(`agent ${agent.name}`, "success");
+	}	private async openConnect(): Promise<void> {
+		const paths = this.options.paths;
+		if (!paths) {
+			this.toast("auth is unavailable in this session", "warning");
+			return;
+		}
+		this.connectDialog?.dispose();
+		const { createAuthHost } = await import("../../commands/next-auth.js");
+		this.connectDialog = new IoConnectDialog({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			cwd: this.options.cwd,
+			createHost: () => createAuthHost(paths),
+			onStatus: (message) => this.toast(message, "success"),
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.keymap.setSuspended(true);
+		await this.connectDialog.open();
+	}
+
+	private async cycleAgent(): Promise<void> {
+		const agents = selectableAgents(this.agentList);
+		if (agents.length === 0 || !this.session) {
+			this.toast("no primary agents available", "warning");
+			return;
+		}
+		const current = agents.findIndex((agent) => agent.id === this.session?.agent);
+		const next = agents[(current + 1) % agents.length];
+		if (!next) return;
+		await this.applyAgent(next);
+	}
+
 	private async runInlineShell(command: string): Promise<void> {
 		if (!command) {
 			this.transcript.addNotice("usage: !command", "info");
@@ -408,13 +523,84 @@ export class IoNextApp {
 
 	private async newSession(): Promise<void> {
 		const model = this.session?.model;
+		const agent = this.session?.agent;
 		const session = await this.options.engine.createSession({
 			directory: this.options.cwd,
 			model,
+			...(agent ? { agent } : {}),
 		});
 		await this.attachSession(session);
 		await this.refreshSessions();
 		this.toast("new session", "success");
+	}
+
+	private async continueSession(): Promise<void> {
+		const sessions = await this.options.engine.listSessions({ directory: this.options.cwd, limit: 5 });
+		const latest = sessions[0];
+		if (!latest) {
+			this.transcript.addNotice("no sessions to continue", "warning");
+			return;
+		}
+		if (latest.id === this.session?.id) {
+			this.toast("already on the latest session", "info");
+			return;
+		}
+		const session = await this.options.engine.resumeSession(latest.id);
+		await this.attachSession(session);
+		await this.refreshSessions();
+		this.toast(`continued ${shortSessionId(latest.id)}`, "success");
+	}
+
+	private async update(): Promise<void> {
+		this.toast("checking for updates", "info");
+		try {
+			const { updateCommand } = await import("../../commands/next-update.js");
+			const code = await updateCommand({
+				stdout: (text) => {
+					const value = text.trim();
+					if (value) this.transcript.addNotice(value, "info");
+				},
+				stderr: (text) => {
+					const value = text.trim();
+					if (value) this.transcript.addNotice(value, "error");
+				},
+			});
+			if (code !== 0) this.toast("update check failed", "error");
+		} catch (error) {
+			this.toast(String((error as Error).message ?? error), "error");
+		}
+	}
+
+	private async changeDirectory(input?: string): Promise<void> {
+		if (!input) {
+			this.transcript.addNotice(`cwd ${this.options.cwd}`, "info");
+			return;
+		}
+		const home = process.env.HOME;
+		const expanded =
+			input === "~" ? (home ?? input) : input.startsWith("~/") && home ? join(home, input.slice(2)) : input;
+		const target = resolve(this.options.cwd, expanded);
+		let directory: boolean;
+		try {
+			directory = statSync(target).isDirectory();
+		} catch {
+			this.transcript.addNotice(`not a directory: ${target}`, "error");
+			return;
+		}
+		if (!directory) {
+			this.transcript.addNotice(`not a directory: ${target}`, "error");
+			return;
+		}
+		try {
+			await this.session?.move(target);
+		} catch (error) {
+			this.transcript.addNotice(`cannot change directory: ${String((error as Error).message ?? error)}`, "error");
+			return;
+		}
+		this.options.cwd = target;
+		await this.refreshSessions();
+		await this.refreshFooter();
+		this.toast(`cwd ${target}`, "success");
 	}
 
 	private async compact(): Promise<void> {
@@ -515,13 +701,23 @@ export class IoNextApp {
 			this.palette = new IoCommandPalette({
 				renderer: this.options.renderer,
 				shell: this.shell,
-				commands: this.commands,
+				commands: [...this.commands, ...this.slashCommands()],
 				onClose: () => this.resumeUi(),
 				onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 			});
 		}
 		this.keymap.setSuspended(true);
 		this.palette.open();
+	}
+
+	private slashCommands(): IoCommand[] {
+		return SLASH_COMMANDS.map((command) => ({
+			id: `slash:${command.value}`,
+			title: command.value,
+			description: command.description,
+			keys: [],
+			run: () => this.runCommand(command.value),
+		}));
 	}
 
 	private resumeUi(): void {
@@ -532,6 +728,8 @@ export class IoNextApp {
 
 	private closeTransientOverlays(): void {
 		this.palette?.close();
+		this.agentPicker?.close();
+		this.connectDialog?.close();
 		this.modelPicker?.close();
 		this.sessionSwitcher?.close();
 		this.diffViewer?.close();
@@ -539,13 +737,17 @@ export class IoNextApp {
 	}
 
 	private async refreshSessions(): Promise<void> {
-		this.sessionList = await this.options.engine.listSessions();
+		this.sessionList = await this.options.engine.listSessions({ directory: this.options.cwd });
 		this.tabs.setSessions(this.sessionList, this.session?.id);
 	}
 
+	private agentName(agentID: string | undefined): string | undefined {
+		if (!agentID) return undefined;
+		return this.agentList.find((agent) => agent.id === agentID)?.name ?? agentID;
+	}
+
 	private async refreshFooter(): Promise<void> {
-		const session = this.session;
-		const model = session?.model;
+		const session = this.session;		const model = session?.model;
 		const branch = await getGitBranchAsync(this.options.cwd);
 		let context: string | undefined;
 		let tokens: string | undefined;
@@ -564,6 +766,7 @@ export class IoNextApp {
 		this.shell.setFooter({
 			cwd: formatCwdForFooter(this.options.cwd, process.env.HOME),
 			branch,
+			agent: this.agentName(session?.agent),
 			model: model ? `${model.provider}/${model.id}${model.variant ? ` (${model.variant})` : ""}` : undefined,
 			context,
 			tokens,
@@ -618,6 +821,8 @@ export class IoNextApp {
 			},
 			"model.list": () => this.openModels(),
 			"model.variant.cycle": () => this.openModels(),
+			"agent.list": () => this.openAgents(),
+			"agent.cycle": () => this.cycleAgent(),
 			"session.list": () => this.openSessions(),
 			"session.new": () => this.newSession(),
 			"session.compact": () => this.compact(),
@@ -661,12 +866,16 @@ export async function createIoEngine(options: IoEngineFromPathsOptions): Promise
 	ensureIoDirectories(options.paths);
 	const models = syncModelsConfig(options.paths);
 	for (const warning of models.warnings) process.stderr.write(`io: ${warning}\n`);
-	return OpenCodeEngine.create({
+	const engine = await OpenCodeEngine.create({
 		cwd: options.cwd,
 		configDir: join(options.paths.configDir, "opencode"),
 		databasePath: join(options.paths.dataDir, "opencode.db"),
 		plugins: [createIoSecurityPlugin({ cwd: options.cwd, envNames: options.envNames })],
 	});
+	// Wait for the built-in agent plugin so title/compaction/summary and the
+	// general/explore subagents exist before the first session is created.
+	await engine.listAgents();
+	return engine;
 }
 
 /** Production entrypoint: build the embedded OpenCode engine with io's shell tool. */
@@ -676,6 +885,7 @@ export async function createIoNextApp(options: IoNextAppFromPathsOptions): Promi
 		cwd: options.cwd,
 		renderer: options.renderer,
 		engine,
+		paths: options.paths,
 		appearance: options.appearance,
 		sessionID: options.sessionID,
 		model: options.model,

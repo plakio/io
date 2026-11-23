@@ -1,8 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { Plugin as BuiltinAgentPlugin } from "@opencode/core/plugin/agent";
 import { OpenCode } from "@opencode/sdk";
 import type {
 	AgentEngine,
+	EngineAgent,
 	EngineFileDiff,
 	EngineMessage,
 	EngineMessageRole,
@@ -119,6 +121,39 @@ function modelOf(raw: unknown): EngineModel | undefined {
 	};
 }
 
+function agentOf(raw: unknown): EngineAgent | undefined {
+	const value = raw as {
+		id?: unknown;
+		name?: unknown;
+		description?: unknown;
+		mode?: unknown;
+		hidden?: unknown;
+		color?: unknown;
+		steps?: unknown;
+		model?: { providerID?: unknown; id?: unknown; variant?: unknown };
+	};
+	const id = typeof value.id === "string" ? value.id : "";
+	if (!id) return undefined;
+	const model =
+		value.model && typeof value.model.providerID === "string" && typeof value.model.id === "string"
+			? {
+					provider: value.model.providerID,
+					id: value.model.id,
+					...(typeof value.model.variant === "string" ? { variant: value.model.variant } : {}),
+				}
+			: undefined;
+	return {
+		id,
+		name: typeof value.name === "string" && value.name.length > 0 ? value.name : id,
+		description: typeof value.description === "string" ? value.description : undefined,
+		mode: value.mode === "subagent" || value.mode === "all" ? value.mode : "primary",
+		hidden: value.hidden === true,
+		model,
+		color: typeof value.color === "string" ? value.color : undefined,
+		steps: typeof value.steps === "number" && value.steps > 0 ? value.steps : undefined,
+	};
+}
+
 function messageRole(type: string): EngineMessageRole {
 	if (type === "user") return "user";
 	if (type === "assistant") return "assistant";
@@ -163,7 +198,7 @@ export class OpenCodeEngine implements AgentEngine {
 			database: { path: options.databasePath },
 			config: { directory: options.configDir, project: false, claude: false },
 			models: { fetch: options.fetchModels === true },
-			plugins: options.plugins as never,
+			plugins: [BuiltinAgentPlugin, ...(options.plugins ?? [])] as never,
 			log: { level: "error" },
 		});
 		return new OpenCodeEngine(host, options.cwd);
@@ -183,9 +218,24 @@ export class OpenCodeEngine implements AgentEngine {
 		return this.models.get(key) ?? (await this.listModels()).find((model) => `${model.provider}/${model.id}` === key);
 	}
 
+	async listAgents(): Promise<readonly EngineAgent[]> {
+		// The built-in agent plugin activates asynchronously on the embedded host.
+		// Poll briefly so the first palette/footer refresh sees build, general and
+		// the hidden maintenance agents.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const result = await this.host.agent.list({ location: { directory: this.cwd } });
+			const data = (result as { data?: unknown[] }).data ?? [];
+			const agents = data.map(agentOf).filter((agent): agent is EngineAgent => agent !== undefined);
+			if (agents.length > 0) return agents;
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+		return [];
+	}
+
 	async createSession(options: EngineSessionOptions): Promise<EngineSession> {
 		const info = await this.host.sessions.create({
 			location: { directory: options.directory || this.cwd },
+			...(options.agent ? { agent: options.agent } : {}),
 		});
 		if (options.permissions && options.permissions.length > 0) {
 			await this.host.sessions.update({
@@ -193,7 +243,7 @@ export class OpenCodeEngine implements AgentEngine {
 				permissions: options.permissions,
 			});
 		}
-		return this.wrap(info.id, options.model);
+		return this.wrap(info.id, options.model, info.agent ?? options.agent ?? "build");
 	}
 
 	async resumeSession(sessionID: string): Promise<EngineSession> {
@@ -206,7 +256,7 @@ export class OpenCodeEngine implements AgentEngine {
 						...(typeof info.model.variant === "string" ? { variant: info.model.variant } : {}),
 					}
 				: undefined;
-		return this.wrap(info.id, model);
+		return this.wrap(info.id, model, info.agent ?? "build");
 	}
 
 	async listSessions(options: EngineSessionListOptions = {}): Promise<readonly EngineSessionSummary[]> {
@@ -253,8 +303,8 @@ export class OpenCodeEngine implements AgentEngine {
 		await this.host.close();
 	}
 
-	private async wrap(sessionID: string, model?: EngineModelRef): Promise<OpenCodeSession> {
-		const session = new OpenCodeSession(this, this.host, sessionID, model);
+	private async wrap(sessionID: string, model?: EngineModelRef, agent?: string): Promise<OpenCodeSession> {
+		const session = new OpenCodeSession(this, this.host, sessionID, model, agent);
 		this.sessions.add(session);
 		if (model) await session.setModel(model);
 		return session;
@@ -276,6 +326,7 @@ export class OpenCodeSession implements EngineSession {
 	private readonly host: OpenCodeHost;
 	readonly id: string;
 	private currentModel: EngineModelRef | undefined;
+	private currentAgentID: string | undefined;
 	private modelInfo: EngineModel | undefined;
 	private readonly listeners = new Set<(event: IoEvent) => void>();
 	private readonly controller = new AbortController();
@@ -290,16 +341,21 @@ export class OpenCodeSession implements EngineSession {
 	private lastUsage: EngineTokenUsage | undefined;
 	private lastCost = 0;
 
-	constructor(engine: OpenCodeEngine, host: OpenCodeHost, sessionID: string, model?: EngineModelRef) {
+	constructor(engine: OpenCodeEngine, host: OpenCodeHost, sessionID: string, model?: EngineModelRef, agent?: string) {
 		this.engine = engine;
 		this.host = host;
 		this.id = sessionID;
 		this.currentModel = model;
+		this.currentAgentID = agent;
 		this.start();
 	}
 
 	get model(): EngineModelRef | undefined {
 		return this.currentModel;
+	}
+
+	get agent(): string | undefined {
+		return this.currentAgentID;
 	}
 
 	subscribe(listener: (event: IoEvent) => void): () => void {
@@ -352,6 +408,21 @@ export class OpenCodeSession implements EngineSession {
 				...(model.variant ? { variant: model.variant } : {}),
 			},
 		});
+	}
+
+	async setAgent(agentID: string): Promise<void> {
+		await this.host.sessions.switchAgent({ sessionID: this.id, agent: agentID });
+		this.currentAgentID = agentID;
+	}
+
+	async move(directory: string): Promise<void> {
+		await this.host.sessions.move({ sessionID: this.id, directory });
+		// The location change is applied on the next delivery boundary.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const info = await this.host.sessions.get({ sessionID: this.id });
+			if (info.location?.directory === directory) return;
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
 	}
 
 	async respondPermission(

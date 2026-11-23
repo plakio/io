@@ -46,6 +46,8 @@ io auth logout opencode-go
 io auth import
 ```
 
+Inside the TUI, `/connect` is the single authentication entry point: it lists providers, starts OAuth, stores API keys and removes credentials. There is no separate `/login` or `/logout`. The CLI commands above remain available for scripts.
+
 `auth login` uses OpenCode integrations: OAuth providers open the provider browser/device flow, and key providers fall back to an API-key prompt. `auth import` copies API keys from the previous Pi `auth.json`; OAuth credentials should be connected with `auth login`.
 
 Credentials live in OpenCode's credential store, not in `config.json`.
@@ -158,21 +160,43 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+T` | Cycle model variants |
 | `Shift+Tab` | Cycle agents |
 
-Leader actions include `m` models, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
+Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
 
 ## Session commands
 
 ```text
 /help            show commands and keys
-/model [ref]     select a model
+/resume          resume a previous session
+/update          check for and install io updates
+/connect         connect or remove providers
+/agents          list agents and subagents
+/agent           select the primary agent
 /models          list authenticated models
-/sessions        resume a session
+/model [ref]     select a model
 /new             start a new session
+/continue        continue the latest session
+/cd [path]       show or change the working directory
 /compact         compact context
 /diff [path]     show git changes
 /queue           manage queued prompts
 /quit, /q        exit
 ```
+
+## Agents
+
+io registers OpenCode's built-in agents on the embedded host:
+
+| Agent | Mode | Use |
+| --- | --- | --- |
+| `build` | primary | Default coding agent |
+| `plan` | primary | Read-only exploration and planning |
+| `general` | subagent | Multi-step research and parallel work |
+| `explore` | subagent | Fast codebase search and reading |
+| `compaction` | hidden | Context compaction |
+| `title` | hidden | Automatic session titles |
+| `summary` | hidden | Conversation summaries |
+
+`/agent`, `Ctrl+X a` or `Shift+Tab` select a primary agent. `/agents` lists every agent, including subagents and hidden maintenance agents.
 
 ## Configuration
 

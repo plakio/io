@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
 	AgentEngine,
+	EngineAgent,
 	EngineFileDiff,
 	EngineMessage,
 	EngineModel,
@@ -23,6 +24,7 @@ const usage: EngineTokenUsage = { input: 12, output: 4, reasoning: 0, cacheRead:
 class FakeSession implements EngineSession {
 	readonly id: string;
 	readonly model: EngineModelRef | undefined;
+	agent = "build";
 	private listeners = new Set<(event: IoEvent) => void>();
 	disposed = false;
 
@@ -54,6 +56,10 @@ class FakeSession implements EngineSession {
 		return new FakeSession("ses_forked", this.model);
 	}
 	async setModel(): Promise<void> {}
+	async setAgent(agentID: string): Promise<void> {
+		this.agent = agentID;
+	}
+	async move(): Promise<void> {}
 	async respondPermission(_requestID: string, _decision: PermissionDecision): Promise<void> {}
 	async setPermissions(): Promise<void> {}
 	async stats(): Promise<EngineStats> {
@@ -98,8 +104,18 @@ class FakeEngine implements AgentEngine {
 			},
 		];
 	}
+	async listAgents(): Promise<readonly EngineAgent[]> {
+		return [
+			{ id: "build", name: "Build", mode: "primary", hidden: false },
+			{ id: "plan", name: "Plan", mode: "primary", hidden: false },
+			{ id: "general", name: "General", mode: "subagent", hidden: false },
+			{ id: "explore", name: "Explore", mode: "subagent", hidden: false },
+			{ id: "compaction", name: "Compaction", mode: "primary", hidden: true },
+		];
+	}
 	async createSession(options: EngineSessionOptions): Promise<EngineSession> {
 		const session = new FakeSession(`ses_${this.sessions.length + 1}`, options.model);
+		session.agent = options.agent ?? "build";
 		this.sessions.push(session);
 		return session;
 	}
@@ -142,7 +158,7 @@ test("io next app wires engine events into the transcript and footer", { skip: !
 
 		await app.submit("/help", "command");
 		await setup.renderOnce();
-		assert.match(setup.captureCharFrame(), /\/model/);
+		assert.match(setup.captureCharFrame(), /\/continue/);
 
 		await app.submit("/model", "command");
 		await app.submit("/sessions", "command");
@@ -175,7 +191,7 @@ test("io next app runs slash commands typed in the composer", { skip: !supported
 		setup.mockInput.pressEnter();
 		await setup.renderOnce();
 		const frame = setup.captureCharFrame();
-		assert.match(frame, /\/model/);
+		assert.match(frame, /\/continue/);
 		assert.match(frame, /\/quit/);
 		assert.match(frame, /Ctrl\+P/);
 
@@ -221,6 +237,70 @@ test("io next app treats /q as an alias for /quit", { skip: !supported }, async 
 		await app.submit("/q", "command");
 		assert.equal(await app.run(), 0);
 		assert.equal(engine.closed, true);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app cycles primary agents and lists every built-in", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 36, kittyKeyboard: true });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	try {
+		assert.equal(app.currentSession?.agent, "build");
+
+		setup.mockInput.pressTab({ shift: true });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		await setup.renderOnce();
+		assert.equal(app.currentSession?.agent, "plan");
+
+		setup.mockInput.pressTab({ shift: true });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		await setup.renderOnce();
+		assert.equal(app.currentSession?.agent, "build");
+
+		await app.submit("/agents", "command");
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /General \(general\)/);
+		assert.match(frame, /Explore \(explore\)/);
+		assert.match(frame, /Compaction \(compaction\)/);
+		assert.match(frame, /hidden/);
+
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app changes the working directory", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 28 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	try {
+		await app.submit("/cd /tmp", "command");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /\/tmp/);
+
+		await app.submit("/cd /definitely/missing/io-dir", "command");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /not a directory/);
+
+		await app.shutdown(0);
 	} finally {
 		await setup.dispose();
 	}

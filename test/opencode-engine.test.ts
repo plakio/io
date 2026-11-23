@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -26,10 +26,23 @@ test("OpenCode engine streams text and exposes models, stats and messages", { sk
 			"mock model should be registered",
 		);
 
+		const agents = await engine.listAgents();
+		const agentIDs = agents.map((agent) => agent.id);
+		for (const id of ["build", "plan", "general", "explore", "compaction", "title", "summary"]) {
+			assert.ok(agentIDs.includes(id), `expected built-in agent ${id}`);
+		}
+		assert.equal(agents.find((agent) => agent.id === "general")?.mode, "subagent");
+		assert.equal(agents.find((agent) => agent.id === "title")?.hidden, true);
+
 		const session = await engine.createSession({
 			directory: root,
 			model: { provider: "mock", id: "mock-1" },
 		});
+		assert.equal(session.agent, "build");
+		await session.setAgent("plan");
+		assert.equal(session.agent, "plan");
+		await session.setAgent("build");
+		assert.equal(session.agent, "build");
 		const events: IoEvent[] = [];
 		let text = "";
 		session.subscribe((event) => {
@@ -66,6 +79,12 @@ test("OpenCode engine streams text and exposes models, stats and messages", { sk
 		await engine.renameSession(session.id, "renamed session");
 		const renamed = await engine.listSessions();
 		assert.equal(renamed.find((entry) => entry.id === session.id)?.title, "renamed session");
+
+		const subdirectory = join(root, "sub");
+		mkdirSync(subdirectory);
+		await session.move(subdirectory);
+		const moved = await engine.listSessions({ directory: subdirectory });
+		assert.ok(moved.some((entry) => entry.id === session.id), "moved session should appear in the new directory");
 
 		await session.dispose();
 		await engine.deleteSession(session.id);

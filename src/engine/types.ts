@@ -71,6 +71,17 @@ export interface EngineFileDiff {
 	patch: string;
 }
 
+export interface EngineAgent {
+	id: string;
+	name: string;
+	description?: string;
+	mode: "primary" | "subagent" | "all";
+	hidden: boolean;
+	model?: EngineModelRef;
+	color?: string;
+	steps?: number;
+}
+
 export interface EngineSessionSummary {
 	id: string;
 	title: string;
@@ -103,6 +114,7 @@ export interface EnginePermissionRule {
 export interface EngineSessionOptions {
 	directory: string;
 	model?: EngineModelRef;
+	agent?: string;
 	permissions?: readonly EnginePermissionRule[];
 }
 
@@ -180,12 +192,15 @@ export type IoEvent =
 export interface EngineSession {
 	readonly id: string;
 	readonly model: EngineModelRef | undefined;
+	readonly agent: string | undefined;
 	subscribe(listener: (event: IoEvent) => void): () => void;
 	prompt(text: string, options?: EnginePromptOptions): Promise<void>;
 	abort(): Promise<void>;
 	compact(): Promise<void>;
 	fork(before?: string): Promise<EngineSession>;
 	setModel(model: EngineModelRef): Promise<void>;
+	setAgent(agentID: string): Promise<void>;
+	move(directory: string): Promise<void>;
 	respondPermission(requestID: string, decision: PermissionDecision, message?: string): Promise<void>;
 	setPermissions(permissions: readonly EnginePermissionRule[]): Promise<void>;
 	stats(): Promise<EngineStats>;
@@ -197,6 +212,7 @@ export interface EngineSession {
 export interface AgentEngine {
 	readonly kind: EngineKind;
 	listModels(): Promise<readonly EngineModel[]>;
+	listAgents(): Promise<readonly EngineAgent[]>;
 	createSession(options: EngineSessionOptions): Promise<EngineSession>;
 	resumeSession(sessionID: string): Promise<EngineSession>;
 	listSessions(options?: EngineSessionListOptions): Promise<readonly EngineSessionSummary[]>;

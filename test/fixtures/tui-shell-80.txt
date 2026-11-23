@@ -17,4 +17,4 @@
  Ask io…  (/help for commands)                                                  
                                                                                 
                                                                                 
- /home/oscar/project · main · opencode/deepseek                         ctx 12% 
+ /home/oscar/project · Build · opencode/deepseek · main                 ctx 12% 

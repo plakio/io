@@ -24,6 +24,7 @@ test("io shell renders the focus layout, tabs, footer and overlays", { skip: !su
 		shell.setFooter({
 			cwd: "/home/oscar/project",
 			branch: "main",
+			agent: "Build",
 			model: "opencode/deepseek",
 			context: "12%",
 			tokens: "12.3k in · 1.2k out",

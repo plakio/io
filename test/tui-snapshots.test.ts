@@ -25,6 +25,7 @@ test("io shell frame snapshots at 120 and 80 columns", { skip: !supported }, asy
 			shell.setFooter({
 				cwd: "/home/oscar/project",
 				branch: "main",
+				agent: "Build",
 				model: "opencode/deepseek",
 				context: "12%",
 				tokens: "12.3k in · 1.2k out",

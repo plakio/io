@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
 	AgentEngine,
+	EngineAgent,
 	EngineFileDiff,
 	EngineMessage,
 	EngineModel,
@@ -31,6 +32,7 @@ const model: EngineModel = {
 class FakeRunSession implements EngineSession {
 	readonly id = "ses_run";
 	readonly model: EngineModelRef = { provider: "mock", id: "mock-1" };
+	readonly agent = "build";
 	permissionCommand: string | undefined;
 	toolError = false;
 	decisions: PermissionDecision[] = [];
@@ -79,6 +81,8 @@ class FakeRunSession implements EngineSession {
 		return this;
 	}
 	async setModel(): Promise<void> {}
+	async setAgent(): Promise<void> {}
+	async move(): Promise<void> {}
 	async setPermissions(permissions: readonly EnginePermissionRule[]): Promise<void> {
 		this.permissions = permissions;
 	}
@@ -116,6 +120,9 @@ class FakeRunEngine implements AgentEngine {
 	readonly session = new FakeRunSession();
 	async listModels(): Promise<readonly EngineModel[]> {
 		return [model];
+	}
+	async listAgents(): Promise<readonly EngineAgent[]> {
+		return [{ id: "build", name: "Build", mode: "primary", hidden: false }];
 	}
 	async createSession(_options: EngineSessionOptions): Promise<EngineSession> {
 		return this.session;
