@@ -6,10 +6,12 @@ const supported = Boolean(process.versions.bun) || (major ?? 0) > 26 || ((major 
 
 test("io transcript renders messages, markdown, tools, thinking and notices", { skip: !supported }, async () => {
 	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { getTreeSitterClient } = await import("@opentui/core");
 	const { IoShell } = await import("../src/tui/next/shell.js");
 	const { IoTranscript } = await import("../src/tui/next/transcript.js");
 	const { ioDarkTheme } = await import("../src/tui/next/theme.js");
 
+	await getTreeSitterClient().initialize();
 	const setup = await createTestRenderer({ width: 100, height: 30 });
 	const shell = new IoShell(setup.renderer, {
 		cwd: "/home/oscar/project",
@@ -89,9 +91,53 @@ test("io transcript renders messages, markdown, tools, thinking and notices", { 
 		await setup.renderOnce();
 		assert.match(setup.captureCharFrame(), /history 29/);
 
+		// Let any pending Tree-sitter highlight finish before destroying the block.
+		await new Promise((resolve) => setTimeout(resolve, 250));
 		transcript.clear();
 		await setup.renderOnce();
 		assert.doesNotMatch(setup.captureCharFrame(), /refactor the auth flow/);
+	} finally {
+		transcript.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});
+
+test("io transcript highlights fenced code with the io palette", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { getTreeSitterClient } = await import("@opentui/core");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoTranscript } = await import("../src/tui/next/transcript.js");
+
+	await getTreeSitterClient().initialize();
+	const setup = await createTestRenderer({ width: 100, height: 20 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.0" });
+	const transcript = new IoTranscript({ renderer: setup.renderer, container: shell.transcriptContainer });
+
+	try {
+		transcript.apply({ type: "text_started", sessionID: "s", messageID: "code" });
+		transcript.apply({
+			type: "text_delta",
+			sessionID: "s",
+			messageID: "code",
+			delta: "```ts\nconst total: number = 42\n```\n",
+		});
+		transcript.apply({ type: "text_ended", sessionID: "s", messageID: "code" });
+
+		let codeLine: Array<{ text: string; fg: { toInts: () => number[] } }> | undefined;
+		let colors = new Set<string>();
+		await setup.waitForFrame((frame) => frame.includes("const total: number = 42"));
+		for (let attempt = 0; attempt < 40 && colors.size < 3; attempt++) {
+			await setup.renderOnce();
+			codeLine = setup
+				.captureSpans()
+				.lines.map((line) => line.spans)
+				.find((spans) => spans.map((span) => span.text).join("").includes("const total: number = 42"));
+			colors = new Set(codeLine?.map((span) => span.fg.toInts().join(",")) ?? []);
+			if (colors.size < 3) await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		assert.ok(codeLine, "expected the highlighted code line in the frame");
+		assert.ok(colors.size >= 3, `expected highlighted code, got ${colors.size} color(s)`);
 	} finally {
 		transcript.dispose();
 		shell.dispose();

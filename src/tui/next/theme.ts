@@ -1,4 +1,5 @@
 import type { IoThemePreference } from "../../config.js";
+import type { StyleDefinitionInput } from "@opentui/core";
 
 export interface IoTheme {
 	background: string;
@@ -45,6 +46,38 @@ export const ioLightTheme: IoTheme = {
 	diffAdd: "#2f7d32",
 	diffRemove: "#b42318",
 };
+
+/**
+ * Tree-sitter highlight scopes mapped onto the io palette. OpenTUI resolves a
+ * scope like `type.builtin` to the base `type` definition when no exact match
+ * exists, so registering the base scopes is enough for Markdown and diffs.
+ */
+export function ioSyntaxStyles(theme: IoTheme): Record<string, StyleDefinitionInput> {
+	return {
+		default: { fg: theme.text },
+		keyword: { fg: theme.accent, bold: true },
+		"keyword.control": { fg: theme.accent, bold: true },
+		"keyword.function": { fg: theme.accent, bold: true },
+		"keyword.operator": { fg: theme.muted },
+		function: { fg: theme.accent },
+		"function.method": { fg: theme.accent },
+		type: { fg: theme.warning },
+		"type.builtin": { fg: theme.warning },
+		string: { fg: theme.success },
+		"string.escape": { fg: theme.warning },
+		number: { fg: theme.warning },
+		boolean: { fg: theme.warning },
+		constant: { fg: theme.warning },
+		comment: { fg: theme.muted, italic: true },
+		variable: { fg: theme.text },
+		property: { fg: theme.text },
+		operator: { fg: theme.muted },
+		punctuation: { fg: theme.muted },
+		"punctuation.delimiter": { fg: theme.muted },
+		tag: { fg: theme.error },
+		attribute: { fg: theme.warning },
+	};
+}
 
 export interface ResolvedTheme {
 	name: "io" | "io-light";

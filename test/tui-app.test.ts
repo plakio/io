@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
 	AgentEngine,
+	EngineFileDiff,
 	EngineMessage,
 	EngineModel,
 	EngineModelRef,
@@ -67,6 +68,9 @@ class FakeSession implements EngineSession {
 		};
 	}
 	async messages(): Promise<readonly EngineMessage[]> {
+		return [];
+	}
+	async diff(): Promise<readonly EngineFileDiff[]> {
 		return [];
 	}
 	async dispose(): Promise<void> {
@@ -138,7 +142,7 @@ test("io next app wires engine events into the transcript and footer", { skip: !
 
 		await app.submit("/help", "command");
 		await setup.renderOnce();
-		assert.match(setup.captureCharFrame(), /Commands/);
+		assert.match(setup.captureCharFrame(), /\/model/);
 
 		await app.submit("/model", "command");
 		await app.submit("/sessions", "command");
@@ -150,6 +154,53 @@ test("io next app wires engine events into the transcript and footer", { skip: !
 
 		await app.shutdown(0);
 		assert.equal(engine.closed, true);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app runs slash commands typed in the composer", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 32 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	try {
+		await setup.mockInput.typeText("/help");
+		setup.mockInput.pressEnter();
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /\/model/);
+		assert.match(frame, /\/quit/);
+		assert.match(frame, /Ctrl\+P/);
+
+		await setup.mockInput.typeText("/nope");
+		setup.mockInput.pressEnter();
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /unknown command: \/nope/);
+
+		await app.submit("/models", "command");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /mock\/mock-1/);
+
+		await app.submit("/model mock/mock-1", "command");
+		await setup.renderOnce();
+		await app.submit("/model missing/model", "command");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /unknown model: missing\/model/);
+
+		await setup.mockInput.typeText("/he");
+		setup.mockInput.pressTab();
+		await setup.renderOnce();
+		const composer = (app as unknown as { composer: { text: string } }).composer;
+		assert.equal(composer.text, "/help ");
+
+		await app.shutdown(0);
 	} finally {
 		await setup.dispose();
 	}

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { OpenCode } from "@opencode/sdk";
 import type {
 	AgentEngine,
+	EngineFileDiff,
 	EngineMessage,
 	EngineMessageRole,
 	EngineModel,
@@ -395,6 +396,11 @@ export class OpenCodeSession implements EngineSession {
 			contextPercent:
 				contextWindow && contextWindow > 0 ? Math.min(100, (contextUsed / contextWindow) * 100) : null,
 		};
+	}
+
+	async diff(): Promise<readonly EngineFileDiff[]> {
+		const files = await this.host.sessions.diff({ sessionID: this.id });
+		return files.map((file: { file: string; patch: string }) => ({ path: file.file, patch: file.patch }));
 	}
 
 	async messages(): Promise<readonly EngineMessage[]> {

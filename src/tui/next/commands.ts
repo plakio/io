@@ -6,6 +6,7 @@ import type { IoCommand } from "./keymap.js";
  */
 export const DEFAULT_KEYBINDINGS: Readonly<Record<string, readonly string[]>> = {
 	"command.palette.show": ["ctrl+p"],
+	"composer.complete": ["tab"],
 	"model.list": ["<leader>m"],
 	"model.variant.cycle": ["ctrl+t"],
 	"agent.cycle": ["shift+tab"],
@@ -27,6 +28,7 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<string, readonly string[]>> = 
 
 const TITLES: Readonly<Record<string, { title: string; description: string }>> = {
 	"command.palette.show": { title: "Command palette", description: "Search and run commands" },
+	"composer.complete": { title: "Complete", description: "Accept the highlighted command or path" },
 	"model.list": { title: "Select model", description: "Choose a provider, model and variant" },
 	"model.variant.cycle": { title: "Cycle model variant", description: "Next reasoning variant" },
 	"agent.cycle": { title: "Cycle agent", description: "Switch primary or subagent" },

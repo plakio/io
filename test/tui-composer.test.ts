@@ -101,3 +101,46 @@ test("io composer handles modes, history, completion, paste and queue", { skip: 
 		await setup.dispose();
 	}
 });
+
+test("io composer sends on Enter and keeps Shift+Enter for new lines", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoComposer } = await import("../src/tui/next/composer.js");
+
+	// Shift+Enter is only distinguishable with the Kitty keyboard protocol.
+	const setup = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.0" });
+	const submitted: Array<{ text: string; mode: string }> = [];
+	const composer = new IoComposer({
+		renderer: setup.renderer,
+		textarea: shell.composer,
+		onSubmit: (text, mode) => submitted.push({ text, mode }),
+	});
+
+	try {
+		await setup.mockInput.typeText("/help");
+		await setup.renderOnce();
+		assert.equal(composer.text, "/help");
+		setup.mockInput.pressEnter();
+		await setup.renderOnce();
+		assert.deepEqual(submitted, [{ text: "/help", mode: "command" }]);
+		assert.equal(composer.text, "");
+
+		await setup.mockInput.typeText("line one");
+		setup.mockInput.pressEnter({ shift: true });
+		await setup.mockInput.typeText("line two");
+		await setup.renderOnce();
+		assert.equal(composer.text, "line one\nline two");
+		assert.equal(submitted.length, 1);
+
+		// Ctrl+J is the fallback newline when the terminal cannot report Shift+Enter.
+		setup.mockInput.pressKey("j", { ctrl: true });
+		await setup.renderOnce();
+		assert.equal(composer.text, "line one\nline two\n");
+		assert.equal(submitted.length, 1);
+	} finally {
+		composer.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});

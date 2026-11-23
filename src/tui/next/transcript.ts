@@ -8,7 +8,7 @@ import {
 	type ScrollBoxRenderable,
 } from "@opentui/core";
 import type { IoEvent } from "../../engine/types.js";
-import { ioDarkTheme, type IoTheme } from "./theme.js";
+import { ioDarkTheme, ioSyntaxStyles, type IoTheme } from "./theme.js";
 
 export interface IoTranscriptOptions {
 	renderer: CliRenderer;
@@ -226,7 +226,7 @@ export class IoTranscript {
 		this.container = options.container;
 		this.theme = options.theme ?? ioDarkTheme;
 		this.showThinking = options.showThinking === true;
-		this.syntaxStyle = SyntaxStyle.create(options.renderer.nativeScene);
+		this.syntaxStyle = SyntaxStyle.fromStyles(ioSyntaxStyles(this.theme), options.renderer.nativeScene);
 	}
 
 	get isEmpty(): boolean {

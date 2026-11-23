@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { CliRenderer } from "@opentui/core";
+import { getTreeSitterClient, type CliRenderer } from "@opentui/core";
 import { getGitBranchAsync } from "../../git-diff.js";
 import {
 	ensureIoDirectories,
@@ -24,7 +24,7 @@ import { IoAppearance } from "./appearance.js";
 import { IoCommandPalette } from "./command-palette.js";
 import { createIoCommands } from "./commands.js";
 import type { IoCommand } from "./keymap.js";
-import { IoComposer } from "./composer.js";
+import { IoComposer, type IoCompletionItem } from "./composer.js";
 import { IoDiffViewer } from "./diff-viewer.js";
 import { IoKeymap } from "./keymap.js";
 import { IoModelPicker } from "./model-picker.js";
@@ -48,17 +48,35 @@ export interface IoNextAppOptions {
 
 const THEMES: readonly IoThemePreference[] = ["io", "io-light", "system", "dark", "light"];
 
+const SLASH_COMMANDS: readonly IoCompletionItem[] = [
+	{ value: "/help", description: "Show commands and keys", kind: "command" },
+	{ value: "/model", description: "Select a model", kind: "command" },
+	{ value: "/models", description: "List available models", kind: "command" },
+	{ value: "/sessions", description: "Resume a session", kind: "command" },
+	{ value: "/resume", description: "Resume a session", kind: "command" },
+	{ value: "/new", description: "Start a new session", kind: "command" },
+	{ value: "/compact", description: "Compact the context", kind: "command" },
+	{ value: "/diff", description: "Show git changes", kind: "command" },
+	{ value: "/queue", description: "Manage queued prompts", kind: "command" },
+	{ value: "/quit", description: "Exit io", kind: "command" },
+];
+
 const HELP = `Commands
   /help          Show this help
-  /model         Select a model
+  /model [ref]   Select a model, optionally by provider/id
+  /models        List available models
   /sessions      Resume a session
   /new           Start a new session
   /compact       Compact the context
-  /diff          Show git changes
+  /diff [path]   Show git changes, optionally filtered by path
   /queue         Manage queued prompts
   /quit          Exit io
 
 Keys
+  Enter          Send the prompt or command
+  Shift+Enter    Insert a new line
+  Ctrl+J         Insert a new line
+  Tab            Complete a command
   Ctrl+P         Command palette
   Ctrl+X m       Models
   Ctrl+X l       Sessions
@@ -116,6 +134,7 @@ export class IoNextApp {
 		this.composer = new IoComposer({
 			renderer: options.renderer,
 			textarea: this.shell.composer,
+			completions: SLASH_COMMANDS,
 			onSubmit: (text, mode, delivery) => {
 				void this.submit(text, mode, delivery);
 			},
@@ -200,6 +219,12 @@ export class IoNextApp {
 	}
 
 	private async initialize(sessionID?: string, model?: EngineModelRef): Promise<void> {
+		// Markdown/Code renderables start highlighting on mount. Initialize the
+		// Tree-sitter worker first, otherwise the first frame falls back to plain
+		// text and the warning sticks for the rest of the session.
+		await getTreeSitterClient()
+			.initialize()
+			.catch(() => undefined);
 		const models = await this.options.engine.listModels();
 		const selected = model ?? (models[0] ? { provider: models[0].provider, id: models[0].id } : undefined);
 		const session = sessionID
@@ -292,13 +317,20 @@ export class IoNextApp {
 	}
 
 	private async runCommand(text: string): Promise<void> {
-		const [command = ""] = text.split(/\s+/);
+		const [command = "", ...args] = text.trim().split(/\s+/);
 		switch (command) {
 			case "/help":
 				this.transcript.addNotice(HELP, "info");
 				return;
 			case "/model":
+				if (args[0]) {
+					await this.selectModel(args[0]);
+					return;
+				}
 				await this.openModels();
+				return;
+			case "/models":
+				await this.listModels();
 				return;
 			case "/sessions":
 			case "/resume":
@@ -311,7 +343,7 @@ export class IoNextApp {
 				await this.compact();
 				return;
 			case "/diff":
-				await this.openDiff();
+				await this.openDiff(args[0]);
 				return;
 			case "/queue":
 				this.openQueue();
@@ -322,6 +354,36 @@ export class IoNextApp {
 			default:
 				this.transcript.addNotice(`unknown command: ${command}. Type /help.`, "warning");
 		}
+	}
+
+	private async listModels(): Promise<void> {
+		const models = await this.options.engine.listModels();
+		if (models.length === 0) {
+			this.transcript.addNotice("no models available. Run io auth login.", "warning");
+			return;
+		}
+		const current = this.session?.model;
+		const lines = models.map((model) => {
+			const ref = `${model.provider}/${model.id}`;
+			const active = current?.provider === model.provider && current.id === model.id ? "*" : " ";
+			const variants = model.variants.length > 0 ? ` · variants: ${model.variants.join(", ")}` : "";
+			return `${active} ${ref}${variants}`;
+		});
+		this.transcript.addNotice(`Models\n${lines.join("\n")}`, "info");
+	}
+
+	private async selectModel(ref: string): Promise<void> {
+		const models = await this.options.engine.listModels();
+		const model = models.find(
+			(candidate) => `${candidate.provider}/${candidate.id}` === ref || candidate.id === ref,
+		);
+		if (!model) {
+			this.transcript.addNotice(`unknown model: ${ref}. Type /models.`, "warning");
+			return;
+		}
+		await this.session?.setModel({ provider: model.provider, id: model.id });
+		await this.refreshFooter();
+		this.toast(`model ${model.provider}/${model.id}`, "success");
 	}
 
 	private async runInlineShell(command: string): Promise<void> {
@@ -414,12 +476,14 @@ export class IoNextApp {
 		this.sessionSwitcher.open();
 	}
 
-	private async openDiff(): Promise<void> {
+	private async openDiff(pathFilter?: string): Promise<void> {
 		this.diffViewer?.dispose();
 		this.diffViewer = new IoDiffViewer({
 			renderer: this.options.renderer,
 			shell: this.shell,
 			cwd: this.options.cwd,
+			fileFilter: pathFilter,
+			turnDiff: async () => (await this.session?.diff() ?? []).map((file) => ({ path: file.path, patch: file.patch })),
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
@@ -547,6 +611,9 @@ export class IoNextApp {
 	private commandHandlers(): Partial<Record<string, () => void | Promise<void>>> {
 		return {
 			"command.palette.show": () => this.openPalette(),
+			"composer.complete": () => {
+				this.composer.acceptCompletion();
+			},
 			"model.list": () => this.openModels(),
 			"model.variant.cycle": () => this.openModels(),
 			"session.list": () => this.openSessions(),

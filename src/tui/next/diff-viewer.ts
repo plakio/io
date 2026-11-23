@@ -10,7 +10,7 @@ import {
 } from "@opentui/core";
 import type { IoKeyEvent } from "./keymap.js";
 import type { IoShell } from "./shell.js";
-import { ioDarkTheme, type IoTheme } from "./theme.js";
+import { ioDarkTheme, ioSyntaxStyles, type IoTheme } from "./theme.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +29,10 @@ export interface IoDiffViewerOptions {
 	theme?: IoTheme;
 	/** Inject for tests or non-git sources. */
 	loadDiff?: (scope: DiffScope, cwd: string) => Promise<readonly DiffFile[]>;
+	/** Files changed by the active session's last turn. */
+	turnDiff?: () => Promise<readonly DiffFile[]>;
+	/** Only show files whose path contains this substring. */
+	fileFilter?: string;
 	onClose?: () => void;
 	onError?: (error: unknown) => void;
 }
@@ -42,6 +46,8 @@ export class IoDiffViewer {
 	private readonly cwd: string;
 	private readonly theme: IoTheme;
 	private readonly loadDiff: (scope: DiffScope, cwd: string) => Promise<readonly DiffFile[]>;
+	private readonly turnDiff: (() => Promise<readonly DiffFile[]>) | undefined;
+	private readonly fileFilter: string | undefined;
 	private readonly onClose: (() => void) | undefined;
 	private readonly onError: ((error: unknown) => void) | undefined;
 	private readonly syntaxStyle: SyntaxStyle;
@@ -67,9 +73,11 @@ export class IoDiffViewer {
 		this.cwd = options.cwd;
 		this.theme = options.theme ?? ioDarkTheme;
 		this.loadDiff = options.loadDiff ?? ((scope, cwd) => loadGitDiffFiles(cwd, scope));
+		this.turnDiff = options.turnDiff;
+		this.fileFilter = options.fileFilter;
 		this.onClose = options.onClose;
 		this.onError = options.onError;
-		this.syntaxStyle = SyntaxStyle.create(options.renderer.nativeScene);
+		this.syntaxStyle = SyntaxStyle.fromStyles(ioSyntaxStyles(this.theme), options.renderer.nativeScene);
 		this.keyHandler = (event) => this.handleKey(event);
 	}
 
@@ -185,7 +193,12 @@ export class IoDiffViewer {
 
 	private async reload(): Promise<void> {
 		try {
-			this.files = await this.loadDiff(this.scope, this.cwd);
+			const files = this.scope === "turn" && this.turnDiff
+				? await this.turnDiff()
+				: await this.loadDiff(this.scope, this.cwd);
+			this.files = this.fileFilter
+				? files.filter((file) => file.path.includes(this.fileFilter!))
+				: files;
 			this.selected = 0;
 			this.hunkIndex = 0;
 			this.rebuild();

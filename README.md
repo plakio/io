@@ -153,7 +153,7 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+C` twice | Exit when the prompt is empty |
 | `Ctrl+P` | Command palette |
 | `Ctrl+X` then key | Leader actions |
-| `Tab` | Complete command or path |
+| `Tab` | Complete a command |
 | `Ctrl+O` | Expand or collapse tool output (leader `o`) |
 | `Ctrl+T` | Cycle model variants |
 | `Shift+Tab` | Cycle agents |

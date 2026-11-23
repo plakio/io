@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
 	AgentEngine,
+	EngineFileDiff,
 	EngineMessage,
 	EngineModel,
 	EngineModelRef,
@@ -98,6 +99,9 @@ class FakeRunSession implements EngineSession {
 		};
 	}
 	async messages(): Promise<readonly EngineMessage[]> {
+		return [];
+	}
+	async diff(): Promise<readonly EngineFileDiff[]> {
 		return [];
 	}
 	async dispose(): Promise<void> {}

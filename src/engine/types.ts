@@ -66,6 +66,11 @@ export interface EnginePermissionRequest {
 	source?: unknown;
 }
 
+export interface EngineFileDiff {
+	path: string;
+	patch: string;
+}
+
 export interface EngineSessionSummary {
 	id: string;
 	title: string;
@@ -185,6 +190,7 @@ export interface EngineSession {
 	setPermissions(permissions: readonly EnginePermissionRule[]): Promise<void>;
 	stats(): Promise<EngineStats>;
 	messages(): Promise<readonly EngineMessage[]>;
+	diff(): Promise<readonly EngineFileDiff[]>;
 	dispose(): Promise<void>;
 }
 

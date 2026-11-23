@@ -1,0 +1,72 @@
+name: Platform QA
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: io 0.2 on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: macos-x64
+            os: macos-15-intel
+          - name: macos-arm64
+            os: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build the platform binary
+        run: npm run build
+      - name: Version and help
+        run: |
+          ./dist-next/io --version
+          ./dist-next/io --help
+      - name: Auth host loads
+        run: ./dist-next/io auth status
+      - name: TUI starts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set +e
+          timeout 10 script -qec './dist-next/io' /dev/null > /tmp/io-tui.log 2>&1
+          status=$?
+          set -e
+          if grep -q "Cannot find module\|FATAL\|panicked" /tmp/io-tui.log; then
+            cat /tmp/io-tui.log
+            exit 1
+          fi
+          # 124 is expected: the TUI stays open until timeout.
+          [ "$status" = "124" ] || [ "$status" = "0" ]
+      - name: TUI starts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set +e
+          script -q /dev/null ./dist-next/io > /tmp/io-tui.log 2>&1 &
+          pid=$!
+          sleep 8
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          set -e
+          if grep -q "Cannot find module\|FATAL\|panicked" /tmp/io-tui.log; then
+            cat /tmp/io-tui.log
+            exit 1
+          fi

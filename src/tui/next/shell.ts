@@ -164,6 +164,20 @@ export class IoShell {
 			backgroundColor: this.theme.background,
 			focusedBackgroundColor: this.theme.background,
 			focusedTextColor: this.theme.text,
+			// OpenTUI defaults to Enter = newline and Meta+Enter = submit. io follows
+			// the OpenCode convention instead: Enter sends, Shift+Enter adds a line.
+			keyBindings: [
+				{ name: "return", action: "submit" },
+				{ name: "kpenter", action: "submit" },
+				{ name: "linefeed", action: "newline" },
+				{ name: "j", ctrl: true, action: "newline" },
+				{ name: "return", shift: true, action: "newline" },
+				{ name: "kpenter", shift: true, action: "newline" },
+				{ name: "linefeed", shift: true, action: "newline" },
+				{ name: "return", meta: true, action: "newline" },
+				{ name: "kpenter", meta: true, action: "newline" },
+				{ name: "linefeed", meta: true, action: "newline" },
+			],
 		});
 		this.composerPanel.add(this.composer);
 		this.root.add(this.composerPanel);
