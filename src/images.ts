@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
-import type { ImageContent } from "@earendil-works/pi-ai";
 
 /** Extension → mime for inline image attachments. */
 const IMAGE_MIME: Record<string, string> = {
@@ -14,6 +13,12 @@ const IMAGE_MIME: Record<string, string> = {
 
 /** Skip attachments larger than this (keeps prompts and session files sane). */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+export interface ImageContent {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
 
 export interface ImageAttachment {
 	path: string;

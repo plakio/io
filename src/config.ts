@@ -18,6 +18,19 @@ export const VERBOSITY_LEVELS: readonly Verbosity[] = ["low", "normal", "high"];
  */
 export type PermissionMode = "ask" | "auto";
 
+export type IoThemePreference = "io" | "io-light" | "system" | "dark" | "light";
+
+export type IoAppearanceVerbosity = "low" | "normal" | "high" | "debug";
+
+export interface IoAppearanceConfig {
+	theme?: IoThemePreference;
+	verbosity?: IoAppearanceVerbosity;
+	thinking?: boolean;
+	tps?: boolean;
+	markdown?: "rendered" | "source";
+	toolOutput?: "collapsed" | "expanded";
+}
+
 export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto"];
 
 export interface IoConfig {
@@ -40,6 +53,8 @@ export interface IoConfig {
 	contextFiles?: boolean;
 	/** Load skills from ~/.agents/skills and <cwd>/.agents/skills. Default true. */
 	skills?: boolean;
+	/** Theme, verbosity and visibility preferences for the new TUI. */
+	appearance?: IoAppearanceConfig;
 }
 
 const KNOWN_CONFIG_KEYS = new Set([
@@ -55,6 +70,7 @@ const KNOWN_CONFIG_KEYS = new Set([
 	"bell",
 	"contextFiles",
 	"skills",
+	"appearance",
 ]);
 
 /** Context settings with their defaults resolved. */
@@ -212,6 +228,11 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 	} else if (input.skills !== undefined) {
 		warnings.push("ignoring invalid config value: skills");
 	}
+	if (input.appearance !== undefined) {
+		const appearance = parseAppearance(input.appearance);
+		if (appearance) config.appearance = appearance;
+		else warnings.push("ignoring invalid config value: appearance");
+	}
 	if (input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)) {
 		const agents: NonNullable<IoConfig["agents"]> = {};
 		for (const [id, value] of Object.entries(input.agents as Record<string, unknown>)) {
@@ -227,6 +248,29 @@ export function parseConfig(raw: unknown): { config: IoConfig; warnings: string[
 		warnings.push("ignoring invalid config value: agents");
 	}
 	return { config, warnings };
+}
+
+function parseAppearance(value: unknown): IoAppearanceConfig | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const input = value as Record<string, unknown>;
+	const appearance: IoAppearanceConfig = {};
+	if (typeof input.theme === "string" && ["io", "io-light", "system", "dark", "light"].includes(input.theme)) {
+		appearance.theme = input.theme as IoThemePreference;
+	} else if (input.theme !== undefined) return undefined;
+	if (
+		typeof input.verbosity === "string" &&
+		["low", "normal", "high", "debug"].includes(input.verbosity)
+	) {
+		appearance.verbosity = input.verbosity as IoAppearanceVerbosity;
+	} else if (input.verbosity !== undefined) return undefined;
+	if (typeof input.thinking === "boolean") appearance.thinking = input.thinking;
+	if (typeof input.tps === "boolean") appearance.tps = input.tps;
+	if (input.markdown === "rendered" || input.markdown === "source") appearance.markdown = input.markdown;
+	else if (input.markdown !== undefined) return undefined;
+	if (input.toolOutput === "collapsed" || input.toolOutput === "expanded") {
+		appearance.toolOutput = input.toolOutput;
+	} else if (input.toolOutput !== undefined) return undefined;
+	return appearance;
 }
 
 export function loadConfig(paths: IoPaths): { config: IoConfig; warnings: string[]; error?: string } {

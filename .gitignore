@@ -6,3 +6,4 @@ coverage.txt
 .DS_Store
 .env
 .env.*
+dist-next/

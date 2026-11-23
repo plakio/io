@@ -1,0 +1,7 @@
+node_modules/
+spike-bin*
+node-bundle/
+results.json
+*.db
+*.db-shm
+*.db-wal

@@ -10,8 +10,8 @@ The permission layer:
 
 - asks for approval before commands that match a conservative destructive
   pattern;
-- supports user-defined allow/ask/deny rules;
-- denies a small set of credential files and known AWS/provider variables;
+- supports OpenCode V2 `{ action, resource, effect }` rules;
+- denies credential files and known AWS/provider variables, and removes provider keys from the Bash environment;
 - keeps the active permission mode and rules in memory for the session, so a
   config-file edit does not unlock the current session.
 
@@ -43,4 +43,4 @@ private vulnerability reporting for the repository. Include the version
 - Use `verbosity normal` or `high` when auditing a session: `low` hides tool
   panels.
 - Review `/debug` output before sharing it; it contains transcript content.
-- Session files are private user data. IO sets them to `0600` and keeps the data directory (`0700`) private.
+- Sessions are private user data in IO's OpenCode database. The data directory is `0700`; imported Pi files remain user-owned.

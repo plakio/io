@@ -11,7 +11,10 @@ import { dirname, join, resolve } from "node:path";
 const root = process.cwd();
 const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const outputPath = resolve(root, process.argv[2] ?? "dist/THIRD_PARTY_NOTICES.txt");
-const fallbackLicense = join(root, "LICENSES", "pi-MIT.txt");
+const fallbackByPackage = new Map([
+	["spdx-exceptions", join(root, "LICENSES", "CC-BY-3.0.txt")],
+	["spdx-license-ids", join(root, "LICENSES", "CC0-1.0.txt")],
+]);
 
 const packages = new Map();
 
@@ -41,6 +44,14 @@ function visit(name, fromDirectory) {
 }
 
 for (const dependency of Object.keys(rootPackage.dependencies ?? {})) visit(dependency, root);
+
+if (process.env.IO_INCLUDE_DEV === "1") {
+	// The next build embeds dev-time OpenCode/OpenTUI packages.
+	for (const dependency of Object.keys(rootPackage.devDependencies ?? {})) {
+		if (["typescript", "esbuild", "tsx", "@types/node"].includes(dependency)) continue;
+		visit(dependency, root);
+	}
+}
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)/i;
 
@@ -92,8 +103,9 @@ for (const { directory, pkg } of packages.values()) {
 	packageRows.push({ name, version, license, repository: repositoryOf(pkg) });
 
 	let files = collectLicenseFiles(directory);
-	if (files.length === 0 && name.startsWith("@earendil-works/") && existsSync(fallbackLicense)) {
-		files = [fallbackLicense];
+	const fallback = fallbackByPackage.get(name);
+	if (files.length === 0 && fallback && existsSync(fallback)) {
+		files = [fallback];
 	}
 	if (files.length === 0) {
 		missingText.push({ name, version, license, repository: repositoryOf(pkg) });

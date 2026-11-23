@@ -6,11 +6,12 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
-      pi-sdk:
+      opencode-opentui:
         patterns:
-          - "@earendil-works/*"
+          - "@opencode/*"
+          - "@opentui/*"
     ignore:
-      # @types/node must match the minimum supported runtime (Node 22).
+      # @types/node must match the minimum supported runtime (Node 26.4).
       - dependency-name: "@types/node"
         update-types:
           - "version-update:semver-major"

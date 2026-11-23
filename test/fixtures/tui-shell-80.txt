@@ -1,0 +1,20 @@
+ io /home/oscar/project main                                       session 3f2a 
+   1 build    2 explore                                                         
+ user                                                                           
+   refactor the auth flow                                                       
+                                                                                
+ assistant                                                                      
+   I'll inspect the current implementation.                                     
+                                                                                
+   bash  $ rg "auth" src                                                        
+   src/auth.ts:42 ...                                                           
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+────────────────────────────────────────────────────────────────────────────────
+ Ask io…  (/help for commands)                                                  
+                                                                                
+                                                                                
+ /home/oscar/project · main · opencode/deepseek                         ctx 12% 
