@@ -15,6 +15,10 @@ updates:
       - dependency-name: "@types/node"
         update-types:
           - "version-update:semver-major"
+      # @opencode/* 2.3.2 pins effect 4.1.0 exactly. A second Effect copy
+      # breaks the OpenCode runtime (HTTP 500). Remove this rule and bump
+      # OpenCode + effect together once @opencode/* supports 4.1.x.
+      - dependency-name: "effect"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
