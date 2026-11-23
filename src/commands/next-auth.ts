@@ -1,4 +1,6 @@
-import { OpenCode } from "@opencode/sdk";
+import { Effect, Exit, Scope } from "effect";
+import { OpenCode as EffectOpenCode } from "@opencode/sdk/effect";
+import { OpenAIPlugin } from "@opencode/core/plugin/provider/openai";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureIoDirectories, type IoPaths } from "../config.js";
@@ -76,16 +78,46 @@ export interface AuthPrompt {
 
 export async function createAuthHost(paths: IoPaths): Promise<AuthHost> {
 	ensureIoDirectories(paths);
-	const host = await OpenCode.create({
-		database: { path: join(paths.dataDir, "opencode.db") },
-		config: { directory: join(paths.configDir, "opencode"), project: false, claude: false },
-		models: { fetch: false },
-	});
+	const opened = (await Effect.runPromise(
+		Effect.gen(function* () {
+			const scope = yield* Scope.make();
+			const host = yield* EffectOpenCode
+				.create({
+					database: { path: join(paths.dataDir, "opencode.db") },
+					config: { directory: join(paths.configDir, "opencode"), project: false, claude: false },
+					models: { fetch: false },
+					plugins: [OpenAIPlugin as never],
+				})
+				.pipe(Effect.provideService(Scope.Scope, scope));
+			return { host, scope };
+		}) as never,
+	)) as { host: any; scope: Scope.Closeable };
+	const host = opened.host;
+	// Triggering the provider registry loads the provider integration catalog,
+	// including OAuth methods such as OpenAI ChatGPT.
+	await Effect.runPromise(host.provider.list({ location: { directory: process.cwd() } }));
+	const run = <A>(effect: unknown): Promise<A> => Effect.runPromise(effect as Effect.Effect<A>);
 	return {
-		integration: host.integration as never,
-		provider: host.provider as never,
-		credential: host.credential as never,
-		close: () => host.close(),
+		integration: {
+			list: (input) => run(host.integration.list(input)),
+			oauth: host.integration.oauth
+				? {
+						connect: (input) => run(host.integration.oauth!.connect(input)),
+						status: (input) => run(host.integration.oauth!.status(input)),
+						complete: (input) => run(host.integration.oauth!.complete(input)),
+					}
+				: undefined,
+		},
+		provider: { list: (input) => run(host.provider.list(input)) },
+		credential: {
+			list: () => run(host.credential.list()),
+			create: (input) => run(host.credential.create(input)),
+			remove: (input) => run(host.credential.remove(input)),
+			activate: (input) => run(host.credential.activate(input)),
+		},
+		close: async () => {
+			await Effect.runPromise(Scope.close(opened.scope, Exit.void));
+		},
 	};
 }
 
@@ -115,11 +147,9 @@ export async function authLogin(
 	prompt: AuthPrompt,
 	output: AuthOutput,
 ): Promise<number> {
-	const [providers, credentials, integrations] = await Promise.all([
-		host.provider.list({ location: { directory: cwd } }),
-		host.credential.list(),
-		host.integration.list({ location: { directory: cwd } }),
-	]);
+	const providers = await host.provider.list({ location: { directory: cwd } });
+	const integrations = await host.integration.list({ location: { directory: cwd } });
+	const credentials = await host.credential.list();
 	let provider = args.provider;
 	if (!provider) {
 		const options = providers.data.map((entry) => ({

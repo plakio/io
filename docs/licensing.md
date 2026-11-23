@@ -13,6 +13,8 @@ Runtime dependencies:
 | `@opencode/sdk` | MIT | Embedded OpenCode host |
 | `@opencode/plugin` | MIT | Server plugin API used by the io shell |
 | `@opentui/core` | MIT | Terminal renderer and components |
+| `@opencode/core` | MIT | Built-in provider integrations used by auth |
+| `effect` | MIT | Runtime used by the embedded OpenCode host |
 
 The build also bundles transitive OpenCode packages (`@opencode/core`, `@opencode/server`, `@opencode/client`, `@opencode/schema`, `@opencode/ai`, `@opencode/protocol`, `@opencode/plugin`, `@opencode/util`, `@opencode/pty`) and OpenTUI native assets. All are MIT unless the generated notices say otherwise.
 

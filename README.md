@@ -46,7 +46,7 @@ io auth logout opencode-go
 io auth import
 ```
 
-`auth login` uses OpenCode integrations when available and falls back to an API key for configured providers. `auth import` copies API keys from the previous Pi `auth.json`; OAuth credentials must be connected through OpenCode.
+`auth login` uses OpenCode integrations: OAuth providers open the provider browser/device flow, and key providers fall back to an API-key prompt. `auth import` copies API keys from the previous Pi `auth.json`; OAuth credentials should be connected with `auth login`.
 
 Credentials live in OpenCode's credential store, not in `config.json`.
 
