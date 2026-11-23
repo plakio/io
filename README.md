@@ -171,7 +171,7 @@ Leader actions include `m` models, `l` sessions, `n` new session, `c` compact, `
 /compact         compact context
 /diff [path]     show git changes
 /queue           manage queued prompts
-/quit            exit
+/quit, /q        exit
 ```
 
 ## Configuration

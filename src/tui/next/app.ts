@@ -59,6 +59,7 @@ const SLASH_COMMANDS: readonly IoCompletionItem[] = [
 	{ value: "/diff", description: "Show git changes", kind: "command" },
 	{ value: "/queue", description: "Manage queued prompts", kind: "command" },
 	{ value: "/quit", description: "Exit io", kind: "command" },
+	{ value: "/q", description: "Exit io", kind: "command" },
 ];
 
 const HELP = `Commands
@@ -70,7 +71,7 @@ const HELP = `Commands
   /compact       Compact the context
   /diff [path]   Show git changes, optionally filtered by path
   /queue         Manage queued prompts
-  /quit          Exit io
+  /quit, /q      Exit io
 
 Keys
   Enter          Send the prompt or command
@@ -349,6 +350,7 @@ export class IoNextApp {
 				this.openQueue();
 				return;
 			case "/quit":
+			case "/q":
 				await this.shutdown(0);
 				return;
 			default:

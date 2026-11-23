@@ -205,3 +205,23 @@ test("io next app runs slash commands typed in the composer", { skip: !supported
 		await setup.dispose();
 	}
 });
+
+test("io next app treats /q as an alias for /quit", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 24 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	try {
+		await app.submit("/q", "command");
+		assert.equal(await app.run(), 0);
+		assert.equal(engine.closed, true);
+	} finally {
+		await setup.dispose();
+	}
+});
