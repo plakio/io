@@ -33,6 +33,8 @@ class FakeRunSession implements EngineSession {
 	readonly id = "ses_run";
 	readonly model: EngineModelRef = { provider: "mock", id: "mock-1" };
 	readonly agent = "build";
+	readonly parentID = undefined;
+	revert: { messageID: string; files: readonly string[] } | undefined;
 	permissionCommand: string | undefined;
 	toolError = false;
 	decisions: PermissionDecision[] = [];
@@ -83,6 +85,15 @@ class FakeRunSession implements EngineSession {
 	async setModel(): Promise<void> {}
 	async setAgent(): Promise<void> {}
 	async move(): Promise<void> {}
+	async stageRevert(messageID: string): Promise<void> {
+		this.revert = { messageID, files: [] };
+	}
+	async clearRevert(): Promise<void> {
+		this.revert = undefined;
+	}
+	async commitRevert(): Promise<void> {
+		this.revert = undefined;
+	}
 	async setPermissions(permissions: readonly EnginePermissionRule[]): Promise<void> {
 		this.permissions = permissions;
 	}

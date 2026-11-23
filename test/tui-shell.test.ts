@@ -85,3 +85,101 @@ test("io shell renders the focus layout, tabs, footer and overlays", { skip: !su
 		await setup.dispose();
 	}
 });
+
+test("io shell tabs respond to mouse selection and close buttons", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+
+	const setup = await createTestRenderer({ width: 120, height: 24 });
+	const selected: string[] = [];
+	const closed: string[] = [];
+	const shell = new IoShell(setup.renderer, {
+		cwd: "/home/oscar/project",
+		version: "0.2.2",
+		onTabSelect: (id) => selected.push(id),
+		onTabClose: (id) => closed.push(id),
+	});
+	try {
+		shell.setTabs(
+			[
+				{ id: "1", label: "build" },
+				{ id: "2", label: "explore" },
+				{ id: "3", label: "plan" },
+			],
+			"1",
+		);
+		await setup.renderOnce();
+
+		const tab2 = setup.renderer.root.findDescendantById("tab-2");
+		assert.ok(tab2);
+		await setup.mockMouse.click(tab2.screenX + 1, tab2.screenY);
+		assert.deepEqual(selected, ["2"]);
+
+		const close1 = setup.renderer.root.findDescendantById("tab-close-1");
+		assert.ok(close1);
+		await setup.mockMouse.click(close1.screenX, close1.screenY);
+		assert.deepEqual(closed, ["1"]);
+	} finally {
+		shell.dispose();
+		await setup.dispose();
+	}
+});
+
+test("io shell renders the todo plan and hides it when empty", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 24 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	try {
+		shell.setTodos([
+			{ content: "inspect auth flow", status: "completed" },
+			{ content: "patch login", status: "in_progress" },
+			{ content: "run tests", status: "pending" },
+			{ content: "old idea", status: "cancelled" },
+		]);
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /plan/);
+		assert.match(frame, /\[x\] inspect auth flow/);
+		assert.match(frame, /\[~\] patch login/);
+		assert.match(frame, /\[ \] run tests/);
+		assert.match(frame, /\[-\] old idea/);
+
+		shell.setTodos([]);
+		await setup.renderOnce();
+		assert.doesNotMatch(setup.captureCharFrame(), /\[x\] inspect auth flow/);
+	} finally {
+		shell.dispose();
+		await setup.dispose();
+	}
+});
+
+test("io shell shows an optional sidebar without breaking the transcript", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 24 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	try {
+		shell.setTranscriptPlaceholder("hello transcript");
+		shell.setSidebar(["Session", " Build auth", "", "Plan", " [~] patch login"]);
+		assert.equal(shell.isSidebarVisible, false);
+		await setup.renderOnce();
+		assert.doesNotMatch(setup.captureCharFrame(), /Build auth/);
+
+		shell.toggleSidebar();
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /hello transcript/);
+		assert.match(frame, /Build auth/);
+		assert.match(frame, /\[~\] patch login/);
+
+		shell.toggleSidebar();
+		await setup.renderOnce();
+		assert.doesNotMatch(setup.captureCharFrame(), /Build auth/);
+	} finally {
+		shell.dispose();
+		await setup.dispose();
+	}
+});

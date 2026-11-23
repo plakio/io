@@ -176,10 +176,11 @@ export class IoCommandPalette {
 			.filter((entry) => entry.score !== undefined)
 			.sort((left, right) => (left.score ?? 0) - (right.score ?? 0) || left.command.title.localeCompare(right.command.title))
 			.map((entry) => entry.command);
-		this.visible = matches;
-		this.selected = Math.min(this.selected, Math.max(0, matches.length - 1));
+		const ordered = query.length > 0 ? matches : orderForPalette(matches);
+		this.visible = ordered;
+		this.selected = Math.min(this.selected, Math.max(0, ordered.length - 1));
 		clearChildren(this.list);
-		if (matches.length === 0) {
+		if (ordered.length === 0) {
 			this.list.add(
 				new TextRenderable(this.renderer, {
 					content: "No commands",
@@ -190,20 +191,22 @@ export class IoCommandPalette {
 				}),
 			);
 		} else {
-			matches.slice(0, 50).forEach((command, index) => {
-				const selected = index === this.selected;
-				const marker = selected ? "›" : " ";
-				const description = command.description ? `  ${command.description}` : "";
-				this.list?.add(
-					new TextRenderable(this.renderer, {
-						content: `${marker} ${command.title}${description}`,
-						fg: selected ? this.theme.accent : this.theme.text,
-						bg: this.theme.panel,
-						height: 1,
-						wrapMode: "none",
-						truncate: true,
-					}),
-				);
+			let section = "";
+			ordered.slice(0, 60).forEach((command, index) => {
+				const nextSection = query.length > 0 ? "" : command.suggested ? "Suggested" : (command.group ?? "Other");
+				if (nextSection && nextSection !== section) {
+					section = nextSection;
+					this.list?.add(
+						new TextRenderable(this.renderer, {
+							content: section,
+							fg: this.theme.accent,
+							bg: this.theme.panel,
+							height: 1,
+							wrapMode: "none",
+						}),
+					);
+				}
+				this.list?.add(this.commandRow(command, index));
 			});
 		}
 		try {
@@ -213,11 +216,72 @@ export class IoCommandPalette {
 		}
 		this.renderer.requestRender();
 	}
+
+	private commandRow(command: IoCommand, index: number): BoxRenderable {
+		const selected = index === this.selected;
+		const row = new BoxRenderable(this.renderer, {
+			flexDirection: "row",
+			height: 1,
+			backgroundColor: this.theme.panel,
+		});
+		row.add(
+			new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${command.title}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				flexShrink: 0,
+			}),
+		);
+		if (command.description) {
+			row.add(
+				new TextRenderable(this.renderer, {
+					content: `  ${command.description}`,
+					fg: this.theme.muted,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					truncate: true,
+					flexShrink: 1,
+				}),
+			);
+		}
+		row.add(new BoxRenderable(this.renderer, { flexGrow: 1, height: 1 }));
+		const keys = command.keys?.map((key) => key.replace(/^<leader>/, "ctrl+x ").replace(/^leader\+/, "ctrl+x+")).join(" ");
+		if (keys) {
+			row.add(
+				new TextRenderable(this.renderer, {
+					content: keys,
+					fg: selected ? this.theme.accent : this.theme.muted,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					flexShrink: 0,
+				}),
+			);
+		}
+		return row;
+	}
+}
+
+const GROUP_ORDER = ["Commands", "Model", "Agent", "Session", "View", "App", "Other"];
+
+function orderForPalette(commands: readonly IoCommand[]): IoCommand[] {
+	const suggested = commands.filter((command) => command.suggested);
+	const rest = commands
+		.filter((command) => !command.suggested)
+		.sort((left, right) => {
+			const leftGroup = GROUP_ORDER.indexOf(left.group ?? "Other");
+			const rightGroup = GROUP_ORDER.indexOf(right.group ?? "Other");
+			return leftGroup - rightGroup || left.title.localeCompare(right.title);
+		});
+	return [...suggested, ...rest];
 }
 
 function matchScore(command: IoCommand, query: string): number | undefined {
 	if (!query) return 0;
-	const haystack = `${command.id} ${command.title} ${command.description ?? ""}`.toLowerCase();
+	const haystack = `${command.id} ${command.title} ${command.description ?? ""} ${command.group ?? ""} ${(command.keys ?? []).join(" ")}`.toLowerCase();
 	const direct = haystack.indexOf(query);
 	if (direct !== -1) return direct;
 	let cursor = 0;

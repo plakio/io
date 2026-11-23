@@ -7,6 +7,7 @@ export class IoSessionTabs {
 	private readonly engine: AgentEngine;
 	private sessions: readonly EngineSessionSummary[] = [];
 	private activeID: string | undefined;
+	private readonly closed = new Set<string>();
 
 	constructor(shell: IoShell, engine: AgentEngine) {
 		this.shell = shell;
@@ -14,7 +15,7 @@ export class IoSessionTabs {
 	}
 
 	get current(): readonly EngineSessionSummary[] {
-		return this.sessions;
+		return this.visible();
 	}
 
 	get active(): string | undefined {
@@ -30,17 +31,42 @@ export class IoSessionTabs {
 
 	setSessions(sessions: readonly EngineSessionSummary[], activeID?: string): void {
 		this.sessions = sessions;
-		if (activeID !== undefined) this.activeID = activeID;
+		if (activeID !== undefined) {
+			this.activeID = activeID;
+			this.closed.delete(activeID);
+		}
+		const known = new Set(sessions.map((session) => session.id));
+		for (const id of this.closed) if (!known.has(id)) this.closed.delete(id);
 		this.render();
 	}
 
 	setActive(sessionID: string): void {
 		this.activeID = sessionID;
+		this.closed.delete(sessionID);
 		this.render();
 	}
 
+	sessionAt(slot: number): EngineSessionSummary | undefined {
+		return this.visible()[slot - 1];
+	}
+
+	/** Hide a tab locally without deleting the session. Returns the next visible tab. */
+	closeSlot(slot: number): EngineSessionSummary | undefined {
+		const visible = this.visible();
+		const target = visible[slot - 1];
+		if (!target) return undefined;
+		this.closed.add(target.id);
+		const next = this.visible();
+		this.render();
+		return next[Math.min(slot - 1, next.length - 1)] ?? next[0];
+	}
+
+	private visible(): readonly EngineSessionSummary[] {
+		return this.sessions.filter((session) => !this.closed.has(session.id));
+	}
+
 	private render(): void {
-		const visible = this.sessions.slice(0, 10);
+		const visible = this.visible().slice(0, 10);
 		const activeIndex = this.activeID ? visible.findIndex((session) => session.id === this.activeID) : -1;
 		this.shell.setTabs(
 			visible.map((session, index) => ({

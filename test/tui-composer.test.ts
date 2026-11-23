@@ -73,6 +73,13 @@ test("io composer handles modes, history, completion, paste and queue", { skip: 
 		await setup.renderOnce();
 
 		composer.clear();
+		const token = composer.insertPastedText("pasted line\n".repeat(20));
+		assert.match(token, /Pasted text #1/);
+		assert.equal(composer.text, token);
+		assert.equal(composer.submit(), true);
+		assert.match(submitted.at(-1)?.text ?? "", /pasted line\npasted line/);
+
+		composer.clear();
 		composer.setText("!echo hello");
 		assert.equal(composer.submit(), true);
 		assert.equal(submitted.at(-1)?.mode, "shell");
@@ -138,6 +145,33 @@ test("io composer sends on Enter and keeps Shift+Enter for new lines", { skip: !
 		await setup.renderOnce();
 		assert.equal(composer.text, "line one\nline two\n");
 		assert.equal(submitted.length, 1);
+	} finally {
+		composer.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});
+
+test("io composer collapses large bracketed pastes", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoComposer } = await import("../src/tui/next/composer.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 30 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	const summaries: Array<[number, number]> = [];
+	const composer = new IoComposer({
+		renderer: setup.renderer,
+		textarea: shell.composer,
+		onPasteSummary: (lines, characters) => summaries.push([lines, characters]),
+	});
+
+	try {
+		await setup.mockInput.pasteBracketedText(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"));
+		await setup.renderOnce();
+		assert.match(composer.text, /\[Pasted text #1/);
+		assert.equal(summaries.length, 1);
+		assert.equal(summaries[0]?.[0], 20);
 	} finally {
 		composer.dispose();
 		shell.dispose();

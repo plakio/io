@@ -20,6 +20,10 @@ export interface IoCommand {
 	id: string;
 	title: string;
 	description?: string;
+	/** Palette grouping, for example Model, Session or View. */
+	group?: string;
+	/** Show this command in the Suggested section when the palette is empty. */
+	suggested?: boolean;
 	/** OpenCode-style bindings: `ctrl+p`, `<leader>m`, `leader+return`, ... */
 	keys?: readonly string[];
 	run: () => void | Promise<void>;
@@ -32,6 +36,8 @@ export interface IoKeymapOptions {
 	leader?: string;
 	leaderTimeout?: number;
 	theme?: IoTheme;
+	/** Let a focused overlay consume a key before global bindings. */
+	beforeKey?: (event: IoKeyEvent) => boolean;
 	onLeader?: (entries: readonly IoKeymapEntry[]) => void;
 	onError?: (error: unknown) => void;
 }
@@ -52,6 +58,7 @@ export class IoKeymap {
 	private readonly allBindings: IoKeymapEntry[] = [];
 	private readonly onLeader: ((entries: readonly IoKeymapEntry[]) => void) | undefined;
 	private readonly onError: ((error: unknown) => void) | undefined;
+	private readonly beforeKey: ((event: IoKeyEvent) => boolean) | undefined;
 	private readonly leader: string;
 	private readonly leaderTimeout: number;
 	private pendingLeader = false;
@@ -65,6 +72,7 @@ export class IoKeymap {
 		this.theme = options.theme ?? ioDarkTheme;
 		this.onLeader = options.onLeader;
 		this.onError = options.onError;
+		this.beforeKey = options.beforeKey;
 		this.leader = normalizeBinding(options.leader ?? "ctrl+x");
 		this.leaderTimeout = Math.max(100, options.leaderTimeout ?? 1_500);
 		for (const command of options.commands) {
@@ -83,7 +91,7 @@ export class IoKeymap {
 			event.preventDefault?.();
 			event.stopPropagation?.();
 		};
-		this.renderer.keyInput.on("keypress", this.keyHandler);
+		this.renderer.keyInput.prependListener("keypress", this.keyHandler);
 	}
 
 	get commandBindings(): readonly IoKeymapEntry[] {
@@ -101,6 +109,7 @@ export class IoKeymap {
 
 	handleKey(event: IoKeyEvent): boolean {
 		if (this.suspended) return false;
+		if (this.beforeKey?.(event)) return true;
 		const key = keyId(event);
 		if (!key) return false;
 

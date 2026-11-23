@@ -216,6 +216,7 @@ export class IoTranscript {
 	private readonly syntaxStyle: SyntaxStyle;
 	private readonly assistantBlocks = new Map<string, AssistantBlock>();
 	private readonly toolCards = new Map<string, ToolCard>();
+	private readonly userBlocks: Array<{ text: string; box: BoxRenderable }> = [];
 	private activeAssistant: AssistantBlock | undefined;
 	private showThinking: boolean;
 	private toolOutputExpanded = true;
@@ -231,6 +232,22 @@ export class IoTranscript {
 
 	get isEmpty(): boolean {
 		return this.container.getChildrenCount() === 0;
+	}
+
+	get userMessages(): readonly string[] {
+		return this.userBlocks.map((entry) => entry.text);
+	}
+
+	focusUserMessage(index: number): boolean {
+		const entry = this.userBlocks[index];
+		if (!entry) return false;
+		try {
+			this.container.scrollTo(Math.max(0, entry.box.y));
+		} catch {
+			// Layout may not be ready yet.
+		}
+		this.renderer.requestRender();
+		return true;
 	}
 
 	addUser(text: string): void {
@@ -257,6 +274,7 @@ export class IoTranscript {
 			}),
 		);
 		this.container.add(block);
+		this.userBlocks.push({ text, box: block });
 		this.scrollToEnd();
 		this.renderer.requestRender();
 	}
@@ -412,6 +430,7 @@ export class IoTranscript {
 		clearChildren(this.container);
 		this.assistantBlocks.clear();
 		this.toolCards.clear();
+		this.userBlocks.length = 0;
 		this.activeAssistant = undefined;
 		this.renderer.requestRender();
 	}

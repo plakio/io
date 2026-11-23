@@ -14,7 +14,11 @@ export interface IoComposerOptions {
 	renderer: CliRenderer;
 	textarea: TextareaRenderable;
 	completions?: readonly IoCompletionItem[];
+	/** Character or line count that collapses a paste into a token. */
+	pasteThreshold?: number;
+	onPasteSummary?: (lines: number, characters: number) => void;
 	onSubmit?: (text: string, mode: IoComposerMode, delivery: IoPromptDelivery) => void;
+	onChange?: (text: string, mode: IoComposerMode) => void;
 	onQueueChange?: (queue: readonly string[]) => void;
 	historyLimit?: number;
 }
@@ -30,7 +34,13 @@ export class IoComposer {
 	private readonly renderer: CliRenderer;
 	readonly textarea: TextareaRenderable;
 	private readonly onSubmit: ((text: string, mode: IoComposerMode, delivery: IoPromptDelivery) => void) | undefined;
+	private readonly onChange: ((text: string, mode: IoComposerMode) => void) | undefined;
 	private readonly onQueueChange: ((queue: readonly string[]) => void) | undefined;
+	private readonly onPasteSummary: ((lines: number, characters: number) => void) | undefined;
+	private readonly pasteThreshold: number;
+	private readonly pasted = new Map<string, string>();
+	private pasteCount = 0;
+	private originalHandlePaste: ((event: unknown) => void) | undefined;
 	private readonly historyLimit: number;
 	private readonly history: string[] = [];
 	private historyIndex = 0;
@@ -43,7 +53,10 @@ export class IoComposer {
 		this.renderer = options.renderer;
 		this.textarea = options.textarea;
 		this.onSubmit = options.onSubmit;
+		this.onChange = options.onChange;
 		this.onQueueChange = options.onQueueChange;
+		this.onPasteSummary = options.onPasteSummary;
+		this.pasteThreshold = Math.max(200, options.pasteThreshold ?? 2_000);
 		this.historyLimit = Math.max(1, options.historyLimit ?? 100);
 		this.completions = options.completions ?? [];
 		this.updateMode();
@@ -51,6 +64,12 @@ export class IoComposer {
 		this.textarea.onSubmit = () => {
 			this.submit();
 		};
+		this.originalHandlePaste = this.textarea.handlePaste.bind(this.textarea) as (event: unknown) => void;
+		this.textarea.handlePaste = ((event: { bytes: Uint8Array }) => {
+			const text = new TextDecoder().decode(event.bytes);
+			if (this.shouldSummarize(text)) this.insertPastedText(text);
+			else this.originalHandlePaste?.(event);
+		}) as typeof this.textarea.handlePaste;
 	}
 
 	get text(): string {
@@ -66,12 +85,14 @@ export class IoComposer {
 	}
 
 	setText(text: string): void {
+		this.pasted.clear();
 		this.textarea.setText(text);
 		this.updateMode();
 		this.renderer.requestRender();
 	}
 
 	clear(): void {
+		this.pasted.clear();
 		this.textarea.clear();
 		this.updateMode();
 		this.renderer.requestRender();
@@ -140,8 +161,9 @@ export class IoComposer {
 	}
 
 	submit(delivery: IoPromptDelivery = "steer"): boolean {
-		const text = this.text.trimEnd();
-		if (text.length === 0) return false;
+		const raw = this.text.trimEnd();
+		if (raw.length === 0) return false;
+		const text = this.expandPasted(raw);
 		const mode = this.mode;
 		this.addToHistory(text);
 		this.onSubmit?.(text, mode, delivery);
@@ -150,8 +172,9 @@ export class IoComposer {
 	}
 
 	queue(): number {
-		const text = this.text.trimEnd();
-		if (text.length === 0) return this.queueItems.length;
+		const raw = this.text.trimEnd();
+		if (raw.length === 0) return this.queueItems.length;
+		const text = this.expandPasted(raw);
 		this.queueItems = [...this.queueItems, text];
 		this.clear();
 		this.emitQueue();
@@ -186,6 +209,7 @@ export class IoComposer {
 	dispose(): void {
 		this.textarea.onContentChange = undefined;
 		this.textarea.onSubmit = undefined;
+		if (this.originalHandlePaste) this.textarea.handlePaste = this.originalHandlePaste as typeof this.textarea.handlePaste;
 	}
 
 	private updateMode(): void {
@@ -195,6 +219,30 @@ export class IoComposer {
 			this.mode = next;
 			this.textarea.placeholder = PLACEHOLDERS[next];
 		}
+		this.onChange?.(text, next);
+	}
+
+	/** Collapse a large paste into an editable token that expands on submit. */
+	insertPastedText(text: string): string {
+		const lines = text.split("\n").length;
+		this.pasteCount += 1;
+		const token = `[Pasted text #${this.pasteCount} · ${lines} lines]`;
+		this.pasted.set(token, text);
+		this.textarea.insertText(token);
+		this.updateMode();
+		this.onPasteSummary?.(lines, text.length);
+		this.renderer.requestRender();
+		return token;
+	}
+
+	private shouldSummarize(text: string): boolean {
+		return text.length > this.pasteThreshold || text.split("\n").length > 12;
+	}
+
+	private expandPasted(text: string): string {
+		let expanded = text;
+		for (const [token, value] of this.pasted) expanded = expanded.split(token).join(value);
+		return expanded;
 	}
 
 	private emitQueue(): void {

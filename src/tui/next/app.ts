@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getTreeSitterClient, type CliRenderer } from "@opentui/core";
 import { getGitBranchAsync } from "../../git-diff.js";
@@ -14,6 +14,7 @@ import { createIoSecurityPlugin, runShellCommand } from "../../engine/shell-plug
 import type {
 	AgentEngine,
 	EngineAgent,
+	EngineModel,
 	EngineModelRef,
 	EnginePermissionRequest,
 	EngineSession,
@@ -23,20 +24,28 @@ import type {
 import { VERSION } from "../../version.js";
 import { IoAgentPicker, selectableAgents } from "./agent-picker.js";
 import { IoAppearance } from "./appearance.js";
+import { IoAutocomplete } from "./autocomplete.js";
 import { IoCommandPalette } from "./command-palette.js";
 import { createIoCommands } from "./commands.js";
 import type { IoCommand } from "./keymap.js";
 import { IoComposer, type IoCompletionItem } from "./composer.js";
 import { IoConnectDialog } from "./connect-dialog.js";
 import { IoDiffViewer } from "./diff-viewer.js";
+import { editText } from "./editor.js";
+import { IoErrorPanel } from "./error-panel.js";
+import { sessionMarkdown } from "./export.js";
 import { IoKeymap } from "./keymap.js";
 import { IoModelPicker } from "./model-picker.js";
 import { IoPermissionSheet } from "./permission-sheet.js";
 import { IoQueueManager } from "./queue-manager.js";
 import { IoSessionSwitcher } from "./session-switcher.js";
 import { IoSessionTabs } from "./session-tabs.js";
-import { IoShell } from "./shell.js";
+import { IoShell, type IoShellTodo } from "./shell.js";
+import { IoSubagentPicker } from "./subagent-picker.js";
+import { IoStatusPanel } from "./status-panel.js";
+import { IoTimeline } from "./timeline.js";
 import { IoTranscript } from "./transcript.js";
+import { IoVariantPicker } from "./variant-picker.js";
 
 export interface IoNextAppOptions {
 	cwd: string;
@@ -58,6 +67,16 @@ const SLASH_COMMANDS: readonly IoCompletionItem[] = [
 	{ value: "/update", description: "Check for and install io updates", kind: "command" },
 	{ value: "/connect", description: "Connect or remove providers", kind: "command" },
 	{ value: "/agents", description: "List agents and subagents", kind: "command" },
+	{ value: "/status", description: "Show session and engine status", kind: "command" },
+	{ value: "/subagents", description: "Open a child session", kind: "command" },
+	{ value: "/timeline", description: "Jump to a previous user message", kind: "command" },
+	{ value: "/stash", description: "Stash, list or restore prompt drafts", kind: "command" },
+	{ value: "/error", description: "Show the last error in full", kind: "command" },
+	{ value: "/copy", description: "Copy the last message or session ID", kind: "command" },
+	{ value: "/export", description: "Export the session to Markdown", kind: "command" },
+	{ value: "/edit", description: "Edit the prompt in $EDITOR", kind: "command" },
+	{ value: "/undo", description: "Revert the last user message", kind: "command" },
+	{ value: "/redo", description: "Restore reverted messages", kind: "command" },
 	{ value: "/agent", description: "Select the primary agent", kind: "command" },
 	{ value: "/models", description: "List available models", kind: "command" },
 	{ value: "/model", description: "Select a model", kind: "command" },
@@ -77,6 +96,16 @@ const HELP = `Commands
   /update        Check for and install io updates
   /connect       Connect or remove providers
   /agents        List agents and subagents
+  /status        Show session and engine status
+  /subagents     Open a child session
+  /timeline      Jump to a previous user message
+  /stash [list|pop|clear]  Stash or restore prompt drafts
+  /error         Show the last error in full
+  /copy [id]     Copy the last message or session ID
+  /export [path] Export the session to Markdown
+  /edit          Edit the prompt in $EDITOR
+  /undo          Revert the last user message
+  /redo          Restore reverted messages
   /agent         Select the primary agent
   /models        List available models
   /model [ref]   Select a model, optionally by provider/id
@@ -95,15 +124,28 @@ Keys
   Tab            Complete a command
   Ctrl+P         Command palette
   Ctrl+X m       Models
+  Ctrl+X a       Agents
   Ctrl+X l       Sessions
+  Ctrl+X b       Toggle sidebar
+  Ctrl+X g       Timeline
+  Ctrl+X s       Status
   Ctrl+X d       Diff
   Ctrl+X q       Queue
+  Ctrl+X e       Edit prompt in $EDITOR
+  Ctrl+X j / k   Stash / restore draft
+  Ctrl+X y       Copy last message
+  Ctrl+X z       Last error
+  Ctrl+X u / r   Undo / redo message
+  Ctrl+X down    Subagents
+  Ctrl+X up      Parent session
+  Ctrl+1..9      Switch tab
   Ctrl+X o       Toggle tool output
   Ctrl+X t       Toggle thinking
   Ctrl+X v       Cycle verbosity
   Ctrl+X p       Toggle tokens per second
   Ctrl+X h       Switch theme
-  Esc            Cancel generation / close overlay`;
+  Esc            Arm cancellation
+  Esc twice      Interrupt a running turn`;
 
 /** Wires the new OpenTUI shell to an AgentEngine. */
 export class IoNextApp {
@@ -112,6 +154,7 @@ export class IoNextApp {
 	private readonly shell: IoShell;
 	private readonly transcript: IoTranscript;
 	private readonly composer: IoComposer;
+	private readonly autocomplete: IoAutocomplete;
 	private readonly tabs: IoSessionTabs;
 	private readonly commands: readonly IoCommand[];
 	private readonly keymap: IoKeymap;
@@ -122,13 +165,28 @@ export class IoNextApp {
 	private palette: IoCommandPalette | undefined;
 	private agentPicker: IoAgentPicker | undefined;
 	private connectDialog: IoConnectDialog | undefined;
+	private statusPanel: IoStatusPanel | undefined;
+	private timeline: IoTimeline | undefined;
+	private subagentPicker: IoSubagentPicker | undefined;
 	private modelPicker: IoModelPicker | undefined;
+	private variantPicker: IoVariantPicker | undefined;
 	private sessionSwitcher: IoSessionSwitcher | undefined;
 	private diffViewer: IoDiffViewer | undefined;
 	private queueManager: IoQueueManager | undefined;
 	private permissionSheet: IoPermissionSheet | undefined;
 	private pendingPermission: EnginePermissionRequest | undefined;
 	private toolOutputExpanded = false;
+	private todos: readonly IoShellTodo[] = [];
+	private stashes: string[] = [];
+	private lastError: string | undefined;
+	private errorPanel: IoErrorPanel | undefined;
+	private readonly todoToolCalls = new Set<string>();
+	private busy = false;
+	private interruptArmed = false;
+	private interruptTimer: NodeJS.Timeout | undefined;
+	private spinTimer: NodeJS.Timeout | undefined;
+	private spinFrame = 0;
+	private turnStartedAt = 0;
 	private readonly exitPromise: Promise<number>;
 	private resolveExit!: (code: number) => void;
 	private disposed = false;
@@ -141,6 +199,8 @@ export class IoNextApp {
 			version: VERSION,
 			theme: this.appearance.theme,
 			showTps: this.appearance.tps,
+			onTabSelect: (id) => void this.selectTab(Number(id)),
+			onTabClose: (id) => void this.closeTab(Number(id)),
 		});
 		this.transcript = new IoTranscript({
 			renderer: options.renderer,
@@ -150,6 +210,16 @@ export class IoNextApp {
 		});
 		this.appearance.applyToShell(this.shell);
 		this.appearance.applyToTranscript(this.transcript);
+		this.autocomplete = new IoAutocomplete({
+			renderer: options.renderer,
+			shell: this.shell,
+			completions: SLASH_COMMANDS,
+			cwd: () => this.options.cwd,
+			onAccept: (text) => {
+				this.composer.setText(text);
+				this.shell.focusComposer();
+			},
+		});
 		this.composer = new IoComposer({
 			renderer: options.renderer,
 			textarea: this.shell.composer,
@@ -157,6 +227,9 @@ export class IoNextApp {
 			onSubmit: (text, mode, delivery) => {
 				void this.submit(text, mode, delivery);
 			},
+			onChange: (text) => this.autocomplete.update(text),
+			onPasteSummary: (lines, characters) =>
+				this.toast(`pasted ${lines} lines (${formatTokens(characters)} chars)`, "info"),
 			onQueueChange: (queue) => this.shell.setFooter({ queue: queue.length }),
 		});
 		this.tabs = new IoSessionTabs(this.shell, engine);
@@ -168,6 +241,7 @@ export class IoNextApp {
 			renderer: options.renderer,
 			shell: this.shell,
 			commands: this.commands,
+			beforeKey: (event) => this.autocomplete.handleKey(event),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
 		this.transcript.addNotice("io 2.0 · OpenCode engine · OpenTUI", "info");
@@ -192,6 +266,17 @@ export class IoNextApp {
 	async submit(text: string, mode: "prompt" | "shell" | "command", delivery: "steer" | "queue" = "steer"): Promise<void> {
 		const prompt = text.trim();
 		if (!prompt || !this.session) return;
+		if (this.autocomplete.visible) {
+			const command = this.autocomplete.isCommand;
+			const match = this.autocomplete.accept();
+			if (match) {
+				if (command) {
+					this.composer.clear();
+					await this.runCommand(match.value);
+				}
+				return;
+			}
+		}
 		if (mode === "command") {
 			await this.runCommand(prompt);
 			return;
@@ -202,15 +287,19 @@ export class IoNextApp {
 		}
 		this.transcript.addUser(prompt);
 		try {
+			if (this.session.revert) await this.session.commitRevert();
 			await this.session.prompt(prompt, { delivery, wait: false });
 		} catch (error) {
-			this.toast(String((error as Error).message ?? error), "error");
+			this.lastError = String((error as Error).message ?? error);
+			this.toast(this.lastError, "error");
 		}
 	}
 
 	async shutdown(code = 0): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.stopWorking();
+		this.disarmInterrupt();
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		try {
@@ -220,13 +309,19 @@ export class IoNextApp {
 		}
 		this.palette?.dispose();
 		this.agentPicker?.dispose();
+		this.subagentPicker?.dispose();
+		this.errorPanel?.dispose();
+		this.timeline?.dispose();
+		this.statusPanel?.dispose();
 		this.connectDialog?.dispose();
+		this.variantPicker?.dispose();
 		this.modelPicker?.dispose();
 		this.sessionSwitcher?.dispose();
 		this.diffViewer?.dispose();
 		this.queueManager?.dispose();
 		this.permissionSheet?.dispose();
 		this.keymap.dispose();
+		this.autocomplete.dispose();
 		this.composer.dispose();
 		this.transcript.dispose();
 		this.shell.dispose();
@@ -264,9 +359,12 @@ export class IoNextApp {
 		this.unsubscribe?.();
 		if (this.session && this.session !== session) await this.session.dispose().catch(() => undefined);
 		this.session = session;
+		this.autocomplete.hide();
 		this.unsubscribe = session.subscribe((event) => this.handleEvent(event));
 		this.shell.setHeader({ sessionID: shortSessionId(session.id) });
 		this.transcript.clear();
+		this.todoToolCalls.clear();
+		this.shell.setTodos([]);
 		this.transcript.addNotice(`session ${shortSessionId(session.id)}`, "info");
 		const messages = await session.messages().catch(() => []);
 		for (const message of messages) {
@@ -274,19 +372,45 @@ export class IoNextApp {
 			else if (message.role === "assistant") this.transcript.addAssistant(message.text);
 		}
 		await this.refreshFooter();
+		void this.refreshSidebar();
 	}
 
 	private handleEvent(event: IoEvent): void {
 		this.transcript.apply(event);
+		if (event.type === "tool_started" && event.name === "todowrite") {
+			this.todoToolCalls.add(event.toolCallID);
+			return;
+		}
+		if (event.type === "tool_called" && this.todoToolCalls.has(event.toolCallID)) {
+			const todos = parseTodos(event.input);
+			if (todos) {
+				this.todos = todos;
+				this.shell.setTodos(todos);
+				void this.refreshSidebar();
+			}
+			return;
+		}
+		if (event.type === "tool_finished") {
+			this.todoToolCalls.delete(event.toolCallID);
+		}
 		if (event.type === "turn_started") {
-			this.shell.setFooter({ mode: "generating" });
+			this.busy = true;
+			this.disarmInterrupt();
+			this.startWorking();
 			return;
 		}
 		if (event.type === "turn_ended") {
+			this.busy = false;
+			this.stopWorking();
+			this.disarmInterrupt();
 			this.shell.setFooter({ mode: event.outcome === "succeeded" ? "ready" : event.outcome });
-			if (event.outcome === "failed") this.toast(event.error ?? "turn failed", "error");
+			if (event.outcome === "failed") {
+				this.lastError = event.error ?? "turn failed";
+				this.toast(this.lastError, "error");
+			}
 			void this.refreshFooter();
 			void this.refreshSessions();
+			void this.refreshSidebar();
 			return;
 		}
 		if (event.type === "usage_updated") {
@@ -317,6 +441,7 @@ export class IoNextApp {
 			return;
 		}
 		if (event.type === "error") {
+			this.lastError = event.message;
 			this.toast(event.message, "error");
 		}
 	}
@@ -337,7 +462,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.permissionSheet.open(request);
 	}
 
@@ -362,6 +487,36 @@ export class IoNextApp {
 				return;
 			case "/agents":
 				await this.listAgents();
+				return;
+			case "/status":
+				await this.openStatus();
+				return;
+			case "/subagents":
+				await this.openSubagents();
+				return;
+			case "/timeline":
+				this.openTimeline();
+				return;
+			case "/stash":
+				this.stashCommand(args[0]);
+				return;
+			case "/error":
+				this.openError();
+				return;
+			case "/undo":
+				await this.undo();
+				return;
+			case "/redo":
+				await this.redo();
+				return;
+			case "/copy":
+				await this.copyCommand(args[0]);
+				return;
+			case "/export":
+				await this.exportSession(args[0]);
+				return;
+			case "/edit":
+				await this.openEditor();
 				return;
 			case "/sessions":
 			case "/resume":
@@ -462,7 +617,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.agentPicker.open();
 	}
 
@@ -470,12 +625,384 @@ export class IoNextApp {
 		await this.session?.setAgent(agent.id);
 		await this.refreshFooter();
 		this.toast(`agent ${agent.name}`, "success");
-	}	private async openConnect(): Promise<void> {
+	}	private async openStatus(): Promise<void> {
+		this.subagentPicker?.dispose();
+		this.errorPanel?.dispose();
+		this.timeline?.dispose();
+		this.statusPanel?.dispose();
+		this.statusPanel = new IoStatusPanel({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			load: async () => {
+				const session = this.session;
+				const stats = await session?.stats().catch(() => undefined);
+				const branch = await getGitBranchAsync(this.options.cwd);
+				const model = session?.model;
+				const agents = this.agentList
+					.filter((agent) => !agent.hidden && agent.mode !== "subagent")
+					.map((agent) => agent.name)
+					.join(", ");
+				const context =
+					stats?.contextPercent === null || stats?.contextPercent === undefined
+						? "—"
+						: `${stats.contextPercent.toFixed(1)}%`;
+				return [
+					`Version    io ${VERSION} · ${this.options.engine.kind}`,
+					`Directory  ${this.options.cwd}`,
+					`Branch     ${branch ?? "—"}`,
+					`Session    ${session?.id ?? "—"}`,
+					`Agent      ${this.agentName(session?.agent) ?? "—"}`,
+					`Model      ${model ? `${model.provider}/${model.id}` : "—"}`,
+					`Effort     ${model?.variant ?? "default"}`,
+					`Context    ${context}`,
+					`Tokens     ${stats ? `${formatTokens(stats.tokens.input)} in · ${formatTokens(stats.tokens.output)} out` : "—"}`,
+					`Cost       ${stats && stats.cost > 0 ? `$${stats.cost.toFixed(4)}` : "—"}`,
+					`Queue      ${this.composer.queued.length}`,
+					`Agents     ${agents || "—"}`,
+					`View       ${this.appearance.themePreference} · ${this.appearance.verbosity} · thinking ${this.appearance.thinking ? "on" : "off"}`,
+				];
+			},
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		await this.statusPanel.open();
+	}
+
+	private openError(): void {
+		if (!this.lastError) {
+			this.toast("no error to show", "info");
+			return;
+		}
+		this.errorPanel ??= new IoErrorPanel({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			onClose: () => this.resumeUi(),
+		});
+		this.suspendUi();
+		this.errorPanel.open(this.lastError);
+	}
+
+	private stashCommand(action?: string): void {
+		if (action === "list") {
+			if (this.stashes.length === 0) {
+				this.transcript.addNotice("no stashed drafts", "info");
+				return;
+			}
+			this.transcript.addNotice(
+				`Stashed drafts\n${this.stashes.map((draft, index) => `${index + 1}. ${draft.replace(/\s+/g, " ")}`).join("\n")}`,
+				"info",
+			);
+			return;
+		}
+		if (action === "clear") {
+			this.stashes = [];
+			this.toast("stash cleared", "info");
+			return;
+		}
+		if (action === "pop") {
+			const draft = this.stashes.pop();
+			if (!draft) {
+				this.toast("no stashed drafts", "warning");
+				return;
+			}
+			this.composer.setText(draft);
+			this.shell.focusComposer();
+			this.toast("draft restored", "success");
+			return;
+		}
+		const draft = this.composer.text.trim();
+		if (!draft) {
+			this.toast("nothing to stash", "warning");
+			return;
+		}
+		this.stashes.push(draft);
+		this.composer.clear();
+		this.toast("draft stashed", "success");
+	}
+
+	private async openSubagents(): Promise<void> {
+		if (!this.session) return;
+		const sessions = await this.options.engine.listSessions({
+			directory: this.options.cwd,
+			parentID: this.session.id,
+			limit: 50,
+		});
+		if (sessions.length === 0) {
+			this.toast("this session has no subagents", "info");
+			return;
+		}
+		this.subagentPicker?.dispose();
+		this.subagentPicker = new IoSubagentPicker({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			sessions,
+			activeID: this.session.id,
+			onSelect: (entry) => this.openSession(entry.id),
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		this.subagentPicker.open();
+	}
+
+	private async openParent(): Promise<void> {
+		const parentID = this.session?.parentID;
+		if (!parentID) {
+			this.toast("already at the root session", "info");
+			return;
+		}
+		await this.openSession(parentID);
+	}
+
+	private async cycleSibling(delta: number): Promise<void> {
+		const current = this.session;
+		if (!current) return;
+		const siblings = await this.options.engine.listSessions({
+			directory: this.options.cwd,
+			parentID: current.parentID ?? null,
+			limit: 50,
+		});
+		if (siblings.length < 2) return;
+		const index = siblings.findIndex((entry) => entry.id === current.id);
+		const next = siblings[(index + delta + siblings.length) % siblings.length];
+		if (next && next.id !== current.id) await this.openSession(next.id);
+	}
+
+	private async openSession(sessionID: string): Promise<void> {
+		const session = await this.options.engine.resumeSession(sessionID);
+		await this.attachSession(session);
+		await this.refreshSessions();
+	}
+
+	private async openEditor(): Promise<void> {
+		this.autocomplete.hide();
+		try {
+			await this.options.renderer.suspend();
+		} catch {
+			// Some terminals cannot suspend; the editor still works inline.
+		}
+		try {
+			const result = editText(this.composer.text, { cwd: this.options.cwd });
+			if (result.saved) {
+				this.composer.setText(result.text.trimEnd());
+				this.shell.focusComposer();
+			} else {
+				this.toast("editor exited without saving", "warning");
+			}
+		} finally {
+			try {
+				await this.options.renderer.resume();
+			} catch {
+				// Resume is best effort on non-terminal renderers.
+			}
+			this.shell.focusComposer();
+			this.options.renderer.requestRender();
+		}
+	}
+
+	private copyText(text: string): boolean {
+		try {
+			return this.options.renderer.copyToClipboardOSC52(text);
+		} catch {
+			return false;
+		}
+	}
+
+	private async copyCommand(what?: string): Promise<void> {
+		const session = this.session;
+		if (!session) return;
+		if (what === "id") {
+			const copied = this.copyText(session.id);
+			this.toast(copied ? "session ID copied" : "clipboard unavailable", copied ? "success" : "warning");
+			return;
+		}
+		const messages = await session.messages();
+		const last = [...messages].reverse().find((message) => message.text.trim().length > 0);
+		if (!last) {
+			this.toast("nothing to copy", "info");
+			return;
+		}
+		const copied = this.copyText(last.text);
+		this.toast(copied ? "message copied" : "clipboard unavailable", copied ? "success" : "warning");
+	}
+
+	private async exportSession(path?: string): Promise<void> {
+		const session = this.session;
+		if (!session) return;
+		const messages = await session.messages();
+		const title = this.sessionList.find((entry) => entry.id === session.id)?.title;
+		const model = session.model;
+		const markdown = sessionMarkdown({
+			id: session.id,
+			title,
+			agent: this.agentName(session.agent),
+			model: model ? `${model.provider}/${model.id}${model.variant ? `#${model.variant}` : ""}` : undefined,
+			messages,
+		});
+		const target = path
+			? resolve(this.options.cwd, path)
+			: join(this.options.cwd, `io-session-${shortSessionId(session.id)}.md`);
+		try {
+			writeFileSync(target, markdown);
+			this.transcript.addNotice(`exported ${target}`, "success");
+			this.toast("session exported", "success");
+		} catch (error) {
+			this.lastError = String((error as Error).message ?? error);
+			this.toast(this.lastError, "error");
+		}
+	}
+
+	private async undo(): Promise<void> {
+		const session = this.session;
+		if (!session) return;
+		if (this.busy) {
+			this.toast("wait for the current turn to finish", "warning");
+			return;
+		}
+		const messages = await session.messages();
+		const revertedID = session.revert?.messageID;
+		const lastUser = messages
+			.filter((message) => message.role === "user" && message.text.trim().length > 0 && message.id !== revertedID)
+			.at(-1);
+		if (!lastUser) {
+			this.toast("nothing to undo", "warning");
+			return;
+		}
+		try {
+			await session.stageRevert(lastUser.id);
+			this.composer.setText(lastUser.text);
+			this.shell.focusComposer();
+			await this.reloadTranscript();
+			await this.refreshFooter();
+			void this.refreshSidebar();
+			this.toast("message reverted · /redo to restore", "info");
+		} catch (error) {
+			this.lastError = String((error as Error).message ?? error);
+			this.toast(this.lastError, "error");
+		}
+	}
+
+	private async redo(): Promise<void> {
+		const session = this.session;
+		if (!session?.revert) {
+			this.toast("nothing to redo", "info");
+			return;
+		}
+		try {
+			await session.clearRevert();
+			await this.reloadTranscript();
+			await this.refreshFooter();
+			void this.refreshSidebar();
+			this.toast("messages restored", "success");
+		} catch (error) {
+			this.lastError = String((error as Error).message ?? error);
+			this.toast(this.lastError, "error");
+		}
+	}
+
+	private async reloadTranscript(): Promise<void> {
+		const session = this.session;
+		if (!session) return;
+		await this.attachSession(session);
+	}
+
+	private toggleSidebar(): void {
+		const visible = !this.shell.isSidebarVisible;
+		this.shell.toggleSidebar(visible);
+		if (visible) void this.refreshSidebar();
+		this.toast(`sidebar ${visible ? "shown" : "hidden"}`, "info");
+	}
+
+	private async refreshSidebar(): Promise<void> {
+		if (!this.shell.isSidebarVisible) return;
+		const session = this.session;
+		if (!session) {
+			this.shell.setSidebar(["Session", " no active session"]);
+			return;
+		}
+		const [stats, branch, children] = await Promise.all([
+			session.stats().catch(() => undefined),
+			getGitBranchAsync(this.options.cwd),
+			this.options.engine
+				.listSessions({ directory: this.options.cwd, parentID: session.id, limit: 10 })
+				.catch(() => []),
+		]);
+		const summary = this.sessionList.find((entry) => entry.id === session.id);
+		const model = session.model;
+		const context =
+			stats?.contextPercent === null || stats?.contextPercent === undefined
+				? "—"
+				: `${stats.contextPercent.toFixed(1)}%`;
+		const lines: string[] = [
+			"Session",
+			` ${summary?.title ?? shortSessionId(session.id)}`,
+			"",
+			"Agent",
+			` ${this.agentName(session.agent) ?? "—"}`,
+			"",
+			"Model",
+			` ${model ? `${model.provider}/${model.id}` : "—"}`,
+			` effort ${model?.variant ?? "default"}`,
+			"",
+			"Context",
+			` ${context} · ${stats ? `${formatTokens(stats.tokens.input)} in · ${formatTokens(stats.tokens.output)} out` : "—"}`,
+			` ${stats && stats.cost > 0 ? `$${stats.cost.toFixed(4)}` : "—"}`,
+			"",
+			"Directory",
+			` ${this.options.cwd}`,
+			` ${branch ?? "—"}`,
+		];
+		if (this.todos.length > 0) {
+			lines.push("", "Plan");
+			for (const todo of this.todos.slice(0, 6)) {
+				const marker =
+					todo.status === "completed" ? "[x]" : todo.status === "in_progress" ? "[~]" : todo.status === "cancelled" ? "[-]" : "[ ]";
+				lines.push(` ${marker} ${todo.content}`);
+			}
+		}
+		if (children.length > 0) {
+			lines.push("", "Subagents");
+			for (const child of children.slice(0, 5)) {
+				lines.push(` ${child.busy ? "•" : " "} ${child.title} · ${child.agent ?? "agent"}`);
+			}
+		}
+		lines.push("", "Queue", ` ${this.composer.queued.length} pending`);
+		this.shell.setSidebar(lines);
+	}
+
+	private openTimeline(): void {
+		const entries = this.transcript.userMessages;
+		if (entries.length === 0) {
+			this.toast("no user messages yet", "warning");
+			return;
+		}
+		this.subagentPicker?.dispose();
+		this.errorPanel?.dispose();
+		this.timeline?.dispose();
+		this.timeline = new IoTimeline({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			entries,
+			onSelect: (index) => {
+				this.transcript.focusUserMessage(index);
+			},
+			onClose: () => this.resumeUi(),
+		});
+		this.suspendUi();
+		this.timeline.open();
+	}
+
+	private async openConnect(): Promise<void> {
 		const paths = this.options.paths;
 		if (!paths) {
 			this.toast("auth is unavailable in this session", "warning");
 			return;
 		}
+		this.subagentPicker?.dispose();
+		this.errorPanel?.dispose();
+		this.timeline?.dispose();
+		this.statusPanel?.dispose();
 		this.connectDialog?.dispose();
 		const { createAuthHost } = await import("../../commands/next-auth.js");
 		this.connectDialog = new IoConnectDialog({
@@ -487,7 +1014,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		await this.connectDialog.open();
 	}
 
@@ -534,8 +1061,38 @@ export class IoNextApp {
 		this.toast("new session", "success");
 	}
 
-	private async continueSession(): Promise<void> {
-		const sessions = await this.options.engine.listSessions({ directory: this.options.cwd, limit: 5 });
+	private async selectTab(slot: number): Promise<void> {
+		const target = this.tabs.sessionAt(slot);
+		if (!target || target.id === this.session?.id) return;
+		const session = await this.options.engine.resumeSession(target.id);
+		await this.attachSession(session);
+		await this.refreshSessions();
+	}
+
+	private async closeTab(slot: number): Promise<void> {
+		const target = this.tabs.sessionAt(slot);
+		if (!target) return;
+		const active = target.id === this.session?.id;
+		const next = this.tabs.closeSlot(slot);
+		if (active && next && next.id !== this.session?.id) {
+			const session = await this.options.engine.resumeSession(next.id);
+			await this.attachSession(session);
+			await this.refreshSessions();
+		}
+	}
+
+	private async cycleTab(delta: number): Promise<void> {
+		const tabs = this.tabs.current;
+		if (tabs.length < 2) return;
+		const index = tabs.findIndex((session) => session.id === this.session?.id);
+		const next = tabs[(index + delta + tabs.length) % tabs.length];
+		if (!next || next.id === this.session?.id) return;
+		const session = await this.options.engine.resumeSession(next.id);
+		await this.attachSession(session);
+		await this.refreshSessions();
+	}
+
+	private async continueSession(): Promise<void> {		const sessions = await this.options.engine.listSessions({ directory: this.options.cwd, limit: 5 });
 		const latest = sessions[0];
 		if (!latest) {
 			this.transcript.addNotice("no sessions to continue", "warning");
@@ -612,21 +1169,69 @@ export class IoNextApp {
 	private async openModels(): Promise<void> {
 		const models = await this.options.engine.listModels();
 		const current = this.session?.model;
+		this.variantPicker?.dispose();
 		this.modelPicker?.dispose();
 		this.modelPicker = new IoModelPicker({
 			renderer: this.options.renderer,
 			shell: this.shell,
 			models,
 			current,
-			onSelect: async (model, variant) => {
-				await this.session?.setModel({ provider: model.provider, id: model.id, ...(variant ? { variant } : {}) });
-				await this.refreshFooter();
-			},
+			onSelect: (model, variant) => this.chooseModel(model, variant),
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.modelPicker.open();
+	}
+
+	private async chooseModel(model: EngineModel, variant?: string): Promise<void> {
+		if (model.variants.length === 0) {
+			await this.applyModel(model, undefined);
+			return;
+		}
+		this.openVariantPicker(model, variant);
+	}
+
+	private openVariantPicker(model: EngineModel, preferred?: string): void {
+		const current = this.session?.model;
+		const currentVariant = current?.provider === model.provider && current.id === model.id ? current.variant : undefined;
+		this.variantPicker?.dispose();
+		this.variantPicker = new IoVariantPicker({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			model,
+			current: preferred ?? currentVariant,
+			onSelect: (variant) => this.applyModel(model, variant),
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		this.variantPicker.open();
+	}
+
+	private async applyModel(model: EngineModel, variant?: string): Promise<void> {
+		await this.session?.setModel({
+			provider: model.provider,
+			id: model.id,
+			...(variant ? { variant } : {}),
+		});
+		await this.refreshFooter();
+		this.toast(`model ${model.provider}/${model.id}${variant ? ` · ${variant}` : ""}`, "success");
+	}
+
+	private async cycleVariant(): Promise<void> {
+		const current = this.session?.model;
+		if (!current) return;
+		const models = await this.options.engine.listModels();
+		const model = models.find((entry) => entry.provider === current.provider && entry.id === current.id);
+		if (!model || model.variants.length === 0) {
+			this.toast("this model has no variants", "warning");
+			return;
+		}
+		const index = current.variant ? model.variants.indexOf(current.variant) : -1;
+		const variant = model.variants[(index + 1) % model.variants.length];
+		if (!variant) return;
+		await this.applyModel(model, variant);
 	}
 
 	private async openSessions(): Promise<void> {
@@ -660,7 +1265,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.sessionSwitcher.open();
 	}
 
@@ -675,7 +1280,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		await this.diffViewer.open("working");
 	}
 
@@ -692,7 +1297,7 @@ export class IoNextApp {
 			onClose: () => this.resumeUi(),
 			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 		});
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.queueManager.open();
 	}
 
@@ -706,7 +1311,7 @@ export class IoNextApp {
 				onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
 			});
 		}
-		this.keymap.setSuspended(true);
+		this.suspendUi();
 		this.palette.open();
 	}
 
@@ -720,6 +1325,11 @@ export class IoNextApp {
 		}));
 	}
 
+	private suspendUi(): void {
+		this.autocomplete.hide();
+		this.keymap.setSuspended(true);
+	}
+
 	private resumeUi(): void {
 		this.keymap.setSuspended(false);
 		this.composer.textarea.focus();
@@ -729,7 +1339,12 @@ export class IoNextApp {
 	private closeTransientOverlays(): void {
 		this.palette?.close();
 		this.agentPicker?.close();
+		this.subagentPicker?.close();
+		this.errorPanel?.close();
+		this.timeline?.close();
+		this.statusPanel?.close();
 		this.connectDialog?.close();
+		this.variantPicker?.close();
 		this.modelPicker?.close();
 		this.sessionSwitcher?.close();
 		this.diffViewer?.close();
@@ -747,7 +1362,8 @@ export class IoNextApp {
 	}
 
 	private async refreshFooter(): Promise<void> {
-		const session = this.session;		const model = session?.model;
+		const session = this.session;
+		const model = session?.model;
 		const branch = await getGitBranchAsync(this.options.cwd);
 		let context: string | undefined;
 		let tokens: string | undefined;
@@ -774,6 +1390,70 @@ export class IoNextApp {
 			queue: this.composer.queued.length,
 		});
 		this.shell.setHeader({ cwd: this.options.cwd, branch });
+		if (!this.busy) {
+			const metadata = [
+				session?.parentID ? "↳ subagent" : undefined,
+				this.agentName(session?.agent),
+				model ? `${model.provider}/${model.id}` : undefined,
+				model?.variant ? `effort ${model.variant}` : undefined,
+				context ? `ctx ${context}` : undefined,
+			].filter((value): value is string => typeof value === "string" && value.length > 0);
+			this.shell.setComposerMetadata(metadata.join(" · "));
+		}
+	}
+
+	private startWorking(): void {
+		this.stopWorking();
+		this.turnStartedAt = Date.now();
+		this.spinFrame = 0;
+		this.spinTimer = setInterval(() => {
+			this.spinFrame += 1;
+			this.updateWorkingFooter();
+		}, 120);
+		this.spinTimer.unref?.();
+		this.updateWorkingFooter();
+	}
+
+	private updateWorkingFooter(): void {
+		if (!this.busy) return;
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+		const frame = frames[this.spinFrame % frames.length] ?? "⠋";
+		const elapsed = Math.max(0, Math.floor((Date.now() - this.turnStartedAt) / 1_000));
+		const hint = this.interruptArmed ? "esc again to interrupt" : "esc interrupt";
+		this.shell.setComposerMetadata(
+			`${frame} working · ${elapsed}s · ${hint}`,
+			this.interruptArmed ? this.appearance.theme.warning : this.appearance.theme.muted,
+		);
+	}
+
+	private stopWorking(): void {
+		if (this.spinTimer !== undefined) clearInterval(this.spinTimer);
+		this.spinTimer = undefined;
+	}
+
+	private armInterrupt(): void {
+		this.interruptArmed = true;
+		if (this.interruptTimer !== undefined) clearTimeout(this.interruptTimer);
+		this.interruptTimer = setTimeout(() => this.disarmInterrupt(), 5_000);
+		this.interruptTimer.unref?.();
+		this.updateWorkingFooter();
+	}
+
+	private disarmInterrupt(): void {
+		if (this.interruptTimer !== undefined) clearTimeout(this.interruptTimer);
+		this.interruptTimer = undefined;
+		this.interruptArmed = false;
+		if (this.busy) this.updateWorkingFooter();
+	}
+
+	private async interrupt(): Promise<void> {
+		if (!this.busy) return;
+		if (!this.interruptArmed) {
+			this.armInterrupt();
+			return;
+		}
+		this.disarmInterrupt();
+		await this.session?.abort();
 	}
 
 	private toggleToolOutput(): void {
@@ -817,16 +1497,43 @@ export class IoNextApp {
 		return {
 			"command.palette.show": () => this.openPalette(),
 			"composer.complete": () => {
+				if (this.autocomplete.visible) {
+					this.autocomplete.accept();
+					return;
+				}
 				this.composer.acceptCompletion();
 			},
 			"model.list": () => this.openModels(),
-			"model.variant.cycle": () => this.openModels(),
+			"model.variant.cycle": () => this.cycleVariant(),
 			"agent.list": () => this.openAgents(),
 			"agent.cycle": () => this.cycleAgent(),
 			"session.list": () => this.openSessions(),
 			"session.new": () => this.newSession(),
+			"session.tab.next": () => this.cycleTab(1),
+			"session.tab.previous": () => this.cycleTab(-1),
+			...Object.fromEntries(
+				Array.from({ length: 9 }, (_, index) => [
+					`session.tab.select.${index + 1}`,
+					() => this.selectTab(index + 1),
+				]),
+			),
 			"session.compact": () => this.compact(),
-			"session.interrupt": () => this.session?.abort(),
+			"status.show": () => this.openStatus(),
+			"session.timeline": () => this.openTimeline(),
+			"session.subagent.next": () => this.openSubagents(),
+			"session.subagent.open": () => this.openSubagents(),
+			"session.child.next": () => this.cycleSibling(1),
+			"session.child.previous": () => this.cycleSibling(-1),
+			"session.parent": () => this.openParent(),
+			"sidebar.toggle": () => this.toggleSidebar(),
+			"error.show": () => this.openError(),
+			"session.undo": () => this.undo(),
+			"session.redo": () => this.redo(),
+			"messages.copy": () => this.copyCommand(),
+			"prompt.editor": () => this.openEditor(),
+			"prompt.stash": () => this.stashCommand(),
+			"prompt.stash.pop": () => this.stashCommand("pop"),
+			"session.interrupt": () => this.interrupt(),
 			"prompt.queue": () => {
 				this.composer.submit("queue");
 			},
@@ -843,6 +1550,27 @@ export class IoNextApp {
 	}
 }
 
+
+function parseTodos(input: unknown): readonly IoShellTodo[] | undefined {
+	if (!input || typeof input !== "object") return undefined;
+	const raw = (input as { todos?: unknown }).todos;
+	if (!Array.isArray(raw)) return undefined;
+	const todos: IoShellTodo[] = [];
+	for (const entry of raw) {
+		if (!entry || typeof entry !== "object") continue;
+		const value = entry as { content?: unknown; status?: unknown };
+		const content = typeof value.content === "string" ? value.content.trim() : "";
+		const status =
+			value.status === "completed" || value.status === "in_progress" || value.status === "cancelled"
+				? value.status
+				: value.status === "pending"
+					? "pending"
+					: undefined;
+		if (!content || !status) continue;
+		todos.push({ content, status });
+	}
+	return todos;
+}
 
 export interface IoNextAppFromPathsOptions {
 	cwd: string;

@@ -13,6 +13,7 @@ import type {
 	EnginePermissionRequest,
 	EnginePermissionRule,
 	EnginePromptOptions,
+	EngineRevert,
 	EngineSession,
 	EngineSessionListOptions,
 	EngineSessionOptions,
@@ -154,6 +155,18 @@ function agentOf(raw: unknown): EngineAgent | undefined {
 	};
 }
 
+function revertOf(raw: unknown): EngineRevert | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const value = raw as { messageID?: unknown; files?: unknown };
+	if (typeof value.messageID !== "string") return undefined;
+	const files = Array.isArray(value.files)
+		? value.files
+				.map((file) => (file && typeof file === "object" ? (file as { file?: unknown }).file : undefined))
+				.filter((file): file is string => typeof file === "string")
+		: [];
+	return { messageID: value.messageID, files };
+}
+
 function messageRole(type: string): EngineMessageRole {
 	if (type === "user") return "user";
 	if (type === "assistant") return "assistant";
@@ -243,7 +256,7 @@ export class OpenCodeEngine implements AgentEngine {
 				permissions: options.permissions,
 			});
 		}
-		return this.wrap(info.id, options.model, info.agent ?? options.agent ?? "build");
+		return this.wrap(info.id, options.model, info.agent ?? options.agent ?? "build", info.parentID, revertOf(info.revert));
 	}
 
 	async resumeSession(sessionID: string): Promise<EngineSession> {
@@ -256,7 +269,7 @@ export class OpenCodeEngine implements AgentEngine {
 						...(typeof info.model.variant === "string" ? { variant: info.model.variant } : {}),
 					}
 				: undefined;
-		return this.wrap(info.id, model, info.agent ?? "build");
+		return this.wrap(info.id, model, info.agent ?? "build", info.parentID, revertOf(info.revert));
 	}
 
 	async listSessions(options: EngineSessionListOptions = {}): Promise<readonly EngineSessionSummary[]> {
@@ -264,7 +277,7 @@ export class OpenCodeEngine implements AgentEngine {
 			directory: options.directory ?? this.cwd,
 			limit: options.limit ?? 50,
 			...(options.search ? { search: options.search } : {}),
-			parentID: null,
+			parentID: options.parentID === undefined ? null : options.parentID,
 		});
 		const data = (result as { data?: unknown[] }).data ?? [];
 		return data
@@ -273,7 +286,8 @@ export class OpenCodeEngine implements AgentEngine {
 					id?: unknown;
 					title?: unknown;
 					parentID?: unknown;
-					time?: { created?: unknown; updated?: unknown };
+					agent?: unknown;
+					time?: { created?: unknown; updated?: unknown; busy?: unknown };
 					location?: { directory?: unknown };
 				};
 				if (typeof session.id !== "string") return undefined;
@@ -281,12 +295,17 @@ export class OpenCodeEngine implements AgentEngine {
 					id: session.id,
 					title: typeof session.title === "string" && session.title.length > 0 ? session.title : "(untitled)",
 					parentID: typeof session.parentID === "string" ? session.parentID : undefined,
+					agent: typeof session.agent === "string" ? session.agent : undefined,
+					busy: typeof session.time?.busy === "number",
 					createdAt: number(session.time?.created),
 					updatedAt: number(session.time?.updated),
 					directory: typeof session.location?.directory === "string" ? session.location.directory : undefined,
 				};
 			})
-			.filter((session): session is EngineSessionSummary => session !== undefined && !session.parentID);
+			.filter(
+				(session): session is EngineSessionSummary =>
+					session !== undefined && (options.parentID ? true : !session.parentID),
+			);
 	}
 
 	async renameSession(sessionID: string, title: string): Promise<void> {
@@ -303,8 +322,14 @@ export class OpenCodeEngine implements AgentEngine {
 		await this.host.close();
 	}
 
-	private async wrap(sessionID: string, model?: EngineModelRef, agent?: string): Promise<OpenCodeSession> {
-		const session = new OpenCodeSession(this, this.host, sessionID, model, agent);
+	private async wrap(
+		sessionID: string,
+		model?: EngineModelRef,
+		agent?: string,
+		parentID?: string,
+		revert?: EngineRevert,
+	): Promise<OpenCodeSession> {
+		const session = new OpenCodeSession(this, this.host, sessionID, model, agent, parentID, revert);
 		this.sessions.add(session);
 		if (model) await session.setModel(model);
 		return session;
@@ -327,6 +352,8 @@ export class OpenCodeSession implements EngineSession {
 	readonly id: string;
 	private currentModel: EngineModelRef | undefined;
 	private currentAgentID: string | undefined;
+	private currentParentID: string | undefined;
+	private currentRevert: EngineRevert | undefined;
 	private modelInfo: EngineModel | undefined;
 	private readonly listeners = new Set<(event: IoEvent) => void>();
 	private readonly controller = new AbortController();
@@ -341,12 +368,22 @@ export class OpenCodeSession implements EngineSession {
 	private lastUsage: EngineTokenUsage | undefined;
 	private lastCost = 0;
 
-	constructor(engine: OpenCodeEngine, host: OpenCodeHost, sessionID: string, model?: EngineModelRef, agent?: string) {
+	constructor(
+		engine: OpenCodeEngine,
+		host: OpenCodeHost,
+		sessionID: string,
+		model?: EngineModelRef,
+		agent?: string,
+		parentID?: string,
+		revert?: EngineRevert,
+	) {
 		this.engine = engine;
 		this.host = host;
 		this.id = sessionID;
 		this.currentModel = model;
 		this.currentAgentID = agent;
+		this.currentParentID = parentID;
+		this.currentRevert = revert;
 		this.start();
 	}
 
@@ -356,6 +393,14 @@ export class OpenCodeSession implements EngineSession {
 
 	get agent(): string | undefined {
 		return this.currentAgentID;
+	}
+
+	get parentID(): string | undefined {
+		return this.currentParentID;
+	}
+
+	get revert(): EngineRevert | undefined {
+		return this.currentRevert;
 	}
 
 	subscribe(listener: (event: IoEvent) => void): () => void {
@@ -423,6 +468,21 @@ export class OpenCodeSession implements EngineSession {
 			if (info.location?.directory === directory) return;
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
+	}
+
+	async stageRevert(messageID: string): Promise<void> {
+		const data = await this.host.sessions.revert.stage({ sessionID: this.id, messageID });
+		this.currentRevert = revertOf(data) ?? { messageID, files: [] };
+	}
+
+	async clearRevert(): Promise<void> {
+		await this.host.sessions.revert.clear({ sessionID: this.id });
+		this.currentRevert = undefined;
+	}
+
+	async commitRevert(): Promise<void> {
+		await this.host.sessions.revert.commit({ sessionID: this.id });
+		this.currentRevert = undefined;
 	}
 
 	async respondPermission(

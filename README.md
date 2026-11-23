@@ -159,8 +159,24 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+O` | Expand or collapse tool output (leader `o`) |
 | `Ctrl+T` | Cycle model variants |
 | `Shift+Tab` | Cycle agents |
+| `Ctrl+X b` | Toggle sidebar |
+| `Ctrl+X g` | Session timeline |
+| `Ctrl+X s` | Status |
+| `Ctrl+X u` / `r` | Undo / redo message |
+| `Ctrl+X y` | Copy last message |
+| `Ctrl+X e` | Edit prompt in `$EDITOR` |
+| `Ctrl+X j` / `k` | Stash / restore draft |
+| `Ctrl+X ↓` / `↑` | Subagents / parent session |
+| `Ctrl+1…9` | Switch session tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session tab |
+| `Tab` | Complete a command or `@file` |
+| `Esc` twice | Interrupt a running turn |
 
-Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
+Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `s` status, `g` timeline, `u`/`r` undo/redo, `y` copy, `e` editor, `j`/`k` stash, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
+
+Tabs can be switched by clicking them; the `×` closes the tab without deleting the session.
+
+Typing `/` opens the command menu with descriptions. Typing `@` completes workspace paths. Selecting a model with reasoning variants opens the effort step (`Default`, `low`, `medium`, `high`, …).
 
 ## Session commands
 
@@ -176,6 +192,15 @@ Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c
 /new             start a new session
 /continue        continue the latest session
 /cd [path]       show or change the working directory
+/status          session, model, context and engine state
+/timeline        jump to an earlier user message
+/subagents       open a child session
+/stash [list|pop|clear]  stash or restore prompt drafts
+/error           show the last error in full
+/copy [id]       copy the last message or session ID
+/export [path]   export the session to Markdown
+/edit            edit the prompt in $EDITOR
+/undo, /redo     revert or restore messages
 /compact         compact context
 /diff [path]     show git changes
 /queue           manage queued prompts

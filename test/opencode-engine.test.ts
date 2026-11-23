@@ -70,6 +70,14 @@ test("OpenCode engine streams text and exposes models, stats and messages", { sk
 		assert.ok(messages.some((message) => message.role === "user" && message.text.length > 0));
 		assert.ok(messages.some((message) => message.role === "assistant" && message.text.length > 0));
 
+		const lastUser = messages.findLast((message) => message.role === "user");
+		assert.ok(lastUser);
+		await session.stageRevert(lastUser.id);
+		assert.equal(session.revert?.messageID, lastUser.id);
+		await session.clearRevert();
+		assert.equal(session.revert, undefined);
+		assert.equal(session.parentID, undefined);
+
 		const forked = await session.fork();
 		assert.notEqual(forked.id, session.id);
 		await forked.dispose();

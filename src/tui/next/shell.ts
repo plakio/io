@@ -12,6 +12,7 @@ export interface IoShellTab {
 	id: string;
 	label: string;
 	status?: "idle" | "busy" | "error";
+	closable?: boolean;
 }
 
 export interface IoShellFooter {
@@ -35,9 +36,16 @@ export interface IoShellOptions {
 	model?: string;
 	theme?: IoTheme;
 	showTps?: boolean;
+	onTabSelect?: (id: string) => void;
+	onTabClose?: (id: string) => void;
 }
 
 export type ToastKind = "info" | "success" | "warning" | "error" | "permission";
+
+export interface IoShellTodo {
+	content: string;
+	status: "pending" | "in_progress" | "completed" | "cancelled";
+}
 
 export interface ToastOptions {
 	/** Milliseconds before dismissal. Zero or a negative value keeps it visible. */
@@ -65,17 +73,25 @@ export class IoShell {
 	private readonly branchLabel: TextRenderable;
 	private readonly sessionLabel: TextRenderable;
 	private readonly tabs: BoxRenderable;
+	private readonly mainArea: BoxRenderable;
 	private readonly transcript: ScrollBoxRenderable;
+	private readonly sidebar: BoxRenderable;
+	private readonly sidebarScroll: ScrollBoxRenderable;
+	private sidebarVisible = false;
+	private readonly todoPanel: BoxRenderable;
 	private readonly composerPanel: BoxRenderable;
 	readonly composer: TextareaRenderable;
+	private readonly composerMetadata: TextRenderable;
 	private readonly footer: BoxRenderable;
 	private readonly footerLeft: TextRenderable;
 	private readonly footerRight: TextRenderable;
 	private readonly overlayLayer: BoxRenderable;
 	private readonly toastLayer: BoxRenderable;
 	private readonly floatingLayer: BoxRenderable;
+	private readonly composerMenuLayer: BoxRenderable;
 	private overlayChild: Renderable | undefined;
 	private floatingChild: Renderable | undefined;
+	private composerMenuChild: Renderable | undefined;
 	private readonly toastTimers = new Map<string, NodeJS.Timeout>();
 	private toastCounter = 0;
 	private readonly onResize: () => void;
@@ -84,11 +100,15 @@ export class IoShell {
 	private footerState: IoShellFooter = {};
 	private width: number;
 	private showTps: boolean;
+	private readonly onTabSelect: ((id: string) => void) | undefined;
+	private readonly onTabClose: ((id: string) => void) | undefined;
 
 	constructor(renderer: CliRenderer, options: IoShellOptions) {
 		this.renderer = renderer;
 		this.theme = options.theme ?? ioDarkTheme;
 		this.showTps = options.showTps !== false;
+		this.onTabSelect = options.onTabSelect;
+		this.onTabClose = options.onTabClose;
 		this.width = renderer.width;
 
 		this.root = new BoxRenderable(renderer, {
@@ -135,6 +155,15 @@ export class IoShell {
 		});
 		this.root.add(this.tabs);
 
+		this.mainArea = new BoxRenderable(renderer, {
+			flexDirection: "row",
+			flexGrow: 1,
+			flexShrink: 1,
+			minHeight: 1,
+			backgroundColor: this.theme.background,
+		});
+		this.root.add(this.mainArea);
+
 		this.transcript = new ScrollBoxRenderable(renderer, {
 			flexGrow: 1,
 			flexShrink: 1,
@@ -146,16 +175,56 @@ export class IoShell {
 			stickyStart: "bottom",
 			backgroundColor: this.theme.background,
 		});
-		this.root.add(this.transcript);
+		this.mainArea.add(this.transcript);
 
-		this.composerPanel = new BoxRenderable(renderer, {
+		this.sidebar = new BoxRenderable(renderer, {
+			width: 32,
+			visible: false,
+			flexDirection: "column",
+			border: ["left"],
+			borderColor: this.theme.border,
+			backgroundColor: this.theme.panel,
+			paddingX: 1,
+		});
+		this.sidebarScroll = new ScrollBoxRenderable(renderer, {
+			flexGrow: 1,
+			flexShrink: 1,
+			scrollY: true,
+			backgroundColor: this.theme.panel,
+		});
+		this.sidebar.add(this.sidebarScroll);
+		this.mainArea.add(this.sidebar);
+
+		this.todoPanel = new BoxRenderable(renderer, {
 			flexShrink: 0,
-			height: 4,
+			height: 0,
+			visible: false,
+			flexDirection: "column",
 			border: ["top"],
 			borderColor: this.theme.border,
 			backgroundColor: this.theme.background,
 			paddingX: 1,
 		});
+		this.root.add(this.todoPanel);
+
+		this.composerPanel = new BoxRenderable(renderer, {
+			flexShrink: 0,
+			height: 5,
+			border: ["top"],
+			borderColor: this.theme.border,
+			backgroundColor: this.theme.background,
+			paddingX: 1,
+			flexDirection: "column",
+		});
+		this.composerMetadata = new TextRenderable(renderer, {
+			content: "",
+			fg: this.theme.muted,
+			bg: this.theme.background,
+			height: 1,
+			wrapMode: "none",
+			truncate: true,
+		});
+		this.composerPanel.add(this.composerMetadata);
 		this.composer = new TextareaRenderable(renderer, {
 			height: 3,
 			initialValue: "",
@@ -240,6 +309,22 @@ export class IoShell {
 		});
 		this.root.add(this.floatingLayer);
 
+		this.composerMenuLayer = new BoxRenderable(renderer, {
+			position: "absolute",
+			bottom: 6,
+			left: 1,
+			width: "72%",
+			maxWidth: 96,
+			flexDirection: "column",
+			zIndex: 5,
+			visible: false,
+			border: true,
+			borderColor: this.theme.border,
+			backgroundColor: this.theme.panel,
+			paddingX: 1,
+		});
+		this.root.add(this.composerMenuLayer);
+
 		this.footerState = { cwd: options.cwd, model: options.model };
 		this.updateFooter();
 		this.applyWidth(this.width);
@@ -266,9 +351,17 @@ export class IoShell {
 		this.sessionLabel.fg = theme.muted;
 		this.sessionLabel.bg = theme.panel;
 		this.tabs.backgroundColor = theme.panel;
+		this.mainArea.backgroundColor = theme.background;
 		this.transcript.backgroundColor = theme.background;
+		this.sidebar.borderColor = theme.border;
+		this.sidebar.backgroundColor = theme.panel;
+		this.sidebarScroll.backgroundColor = theme.panel;
+		this.todoPanel.backgroundColor = theme.background;
+		this.todoPanel.borderColor = theme.border;
 		this.composerPanel.backgroundColor = theme.background;
 		this.composerPanel.borderColor = theme.border;
+		this.composerMetadata.fg = theme.muted;
+		this.composerMetadata.bg = theme.background;
 		this.composer.backgroundColor = theme.background;
 		this.composer.focusedBackgroundColor = theme.background;
 		this.composer.textColor = theme.text;
@@ -282,6 +375,8 @@ export class IoShell {
 		this.overlayLayer.backgroundColor = theme.background;
 		this.floatingLayer.borderColor = theme.border;
 		this.floatingLayer.backgroundColor = theme.panel;
+		this.composerMenuLayer.borderColor = theme.border;
+		this.composerMenuLayer.backgroundColor = theme.panel;
 		this.rebuildTabs();
 		this.updateFooter();
 		this.renderer.requestRender();
@@ -381,6 +476,25 @@ export class IoShell {
 		this.renderer.requestRender();
 	}
 
+	showComposerMenu(child: Renderable): void {
+		this.hideComposerMenu();
+		this.composerMenuChild = child;
+		this.composerMenuLayer.add(child);
+		this.composerMenuLayer.visible = true;
+		this.renderer.requestRender();
+	}
+
+	hideComposerMenu(): void {
+		if (this.composerMenuChild) {
+			this.composerMenuLayer.remove(this.composerMenuChild);
+			this.composerMenuChild.destroyRecursively();
+			this.composerMenuChild = undefined;
+		}
+		clearChildren(this.composerMenuLayer);
+		this.composerMenuLayer.visible = false;
+		this.renderer.requestRender();
+	}
+
 	toast(message: string, kind: ToastKind = "info", options: number | ToastOptions = {}): string {
 		const settings = typeof options === "number" ? { durationMs: options } : options;
 		const persistent = settings.persistent === true || settings.durationMs === 0 || (settings.durationMs ?? 0) < 0;
@@ -464,6 +578,84 @@ export class IoShell {
 		this.renderer.requestRender();
 	}
 
+	setComposerMetadata(content: string, color?: string): void {
+		this.composerMetadata.content = content;
+		this.composerMetadata.fg = color ?? this.theme.muted;
+		this.renderer.requestRender();
+	}
+
+	get isSidebarVisible(): boolean {
+		return this.sidebarVisible;
+	}
+
+	setSidebar(lines: readonly string[]): void {
+		clearChildren(this.sidebarScroll);
+		for (const line of lines) {
+			this.sidebarScroll.add(
+				new TextRenderable(this.renderer, {
+					content: line,
+					fg: line.startsWith(" ") ? this.theme.muted : this.theme.text,
+					bg: this.theme.panel,
+					wrapMode: "word",
+				}),
+			);
+		}
+		this.renderer.requestRender();
+	}
+
+	toggleSidebar(visible = !this.sidebarVisible): void {
+		this.sidebarVisible = visible;
+		this.sidebar.visible = visible;
+		this.renderer.requestRender();
+	}
+
+	setTodos(todos: readonly IoShellTodo[]): void {		clearChildren(this.todoPanel);
+		if (todos.length === 0) {
+			this.todoPanel.visible = false;
+			this.todoPanel.height = 0;
+			this.renderer.requestRender();
+			return;
+		}
+		this.todoPanel.visible = true;
+		this.todoPanel.height = Math.min(6, todos.length) + 2;
+		this.todoPanel.add(
+			new TextRenderable(this.renderer, {
+				content: "plan",
+				fg: this.theme.accent,
+				bg: this.theme.background,
+				height: 1,
+				wrapMode: "none",
+			}),
+		);
+		for (const todo of todos.slice(0, 5)) {
+			const marker =
+				todo.status === "completed"
+					? "[x]"
+					: todo.status === "in_progress"
+						? "[~]"
+						: todo.status === "cancelled"
+							? "[-]"
+							: "[ ]";
+			const color =
+				todo.status === "completed"
+					? this.theme.success
+					: todo.status === "in_progress"
+						? this.theme.warning
+						: this.theme.muted;
+			this.todoPanel.add(
+				new TextRenderable(this.renderer, {
+					content: `${marker} ${todo.content}`,
+					fg: todo.status === "cancelled" ? this.theme.muted : color,
+					bg: this.theme.background,
+					height: 1,
+					wrapMode: "none",
+					truncate: true,
+				}),
+			);
+		}
+		this.renderer.requestRender();
+	}
+
 	dispose(): void {
 		for (const timer of this.toastTimers.values()) clearTimeout(timer);
 		this.toastTimers.clear();
@@ -498,7 +690,42 @@ export class IoShell {
 			const label = compact ? tab.id : `${tab.id} ${tab.label}`;
 			const content = status ? `${status} ${label}` : `  ${label}`;
 			const color = tab.status === "error" ? this.theme.error : active ? this.theme.accent : this.theme.muted;
-			this.tabs.add(this.text(content, color, this.theme.panel));
+			const row = new BoxRenderable(this.renderer, {
+				id: `tab-${tab.id}`,
+				flexDirection: "row",
+				height: 1,
+				flexShrink: 0,
+				backgroundColor: this.theme.panel,
+			});
+			row.add(
+				new TextRenderable(this.renderer, {
+					id: `tab-label-${tab.id}`,
+					content,
+					fg: color,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					selectable: false,
+				}),
+			);
+			if (tab.closable !== false) {
+				const close = new TextRenderable(this.renderer, {
+					id: `tab-close-${tab.id}`,
+					content: " ×",
+					fg: this.theme.muted,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					selectable: false,
+				});
+				close.onMouseDown = (event) => {
+					event.stopPropagation();
+					this.onTabClose?.(tab.id);
+				};
+				row.add(close);
+			}
+			row.onMouseDown = () => this.onTabSelect?.(tab.id);
+			this.tabs.add(row);
 		}
 	}
 

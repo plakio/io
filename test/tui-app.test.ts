@@ -25,6 +25,11 @@ class FakeSession implements EngineSession {
 	readonly id: string;
 	readonly model: EngineModelRef | undefined;
 	agent = "build";
+	parentID: string | undefined;
+	revert: { messageID: string; files: readonly string[] } | undefined;
+	messageList: EngineMessage[] = [];
+	hold = false;
+	aborted = 0;
 	private listeners = new Set<(event: IoEvent) => void>();
 	disposed = false;
 
@@ -43,6 +48,7 @@ class FakeSession implements EngineSession {
 			for (const listener of this.listeners) listener(event);
 		};
 		emit({ type: "turn_started", sessionID: this.id });
+		if (this.hold) return;
 		emit({ type: "text_started", sessionID: this.id, messageID: "m1" });
 		emit({ type: "text_delta", sessionID: this.id, messageID: "m1", delta: `echo: ${text}` });
 		emit({ type: "text_ended", sessionID: this.id, messageID: "m1" });
@@ -50,7 +56,10 @@ class FakeSession implements EngineSession {
 		emit({ type: "turn_ended", sessionID: this.id, outcome: "succeeded" });
 	}
 
-	async abort(): Promise<void> {}
+	async abort(): Promise<void> {
+		this.aborted += 1;
+		for (const listener of this.listeners) listener({ type: "turn_ended", sessionID: this.id, outcome: "interrupted" });
+	}
 	async compact(): Promise<void> {}
 	async fork(): Promise<EngineSession> {
 		return new FakeSession("ses_forked", this.model);
@@ -60,6 +69,15 @@ class FakeSession implements EngineSession {
 		this.agent = agentID;
 	}
 	async move(): Promise<void> {}
+	async stageRevert(messageID: string): Promise<void> {
+		this.revert = { messageID, files: [] };
+	}
+	async clearRevert(): Promise<void> {
+		this.revert = undefined;
+	}
+	async commitRevert(): Promise<void> {
+		this.revert = undefined;
+	}
 	async respondPermission(_requestID: string, _decision: PermissionDecision): Promise<void> {}
 	async setPermissions(): Promise<void> {}
 	async stats(): Promise<EngineStats> {
@@ -74,7 +92,7 @@ class FakeSession implements EngineSession {
 		};
 	}
 	async messages(): Promise<readonly EngineMessage[]> {
-		return [];
+		return this.messageList;
 	}
 	async diff(): Promise<readonly EngineFileDiff[]> {
 		return [];
@@ -158,7 +176,7 @@ test("io next app wires engine events into the transcript and footer", { skip: !
 
 		await app.submit("/help", "command");
 		await setup.renderOnce();
-		assert.match(setup.captureCharFrame(), /\/continue/);
+		assert.match(setup.captureCharFrame(), /Ctrl\+X j/);
 
 		await app.submit("/model", "command");
 		await app.submit("/sessions", "command");
@@ -191,9 +209,8 @@ test("io next app runs slash commands typed in the composer", { skip: !supported
 		setup.mockInput.pressEnter();
 		await setup.renderOnce();
 		const frame = setup.captureCharFrame();
-		assert.match(frame, /\/continue/);
-		assert.match(frame, /\/quit/);
-		assert.match(frame, /Ctrl\+P/);
+		assert.match(frame, /Ctrl\+X j/);
+		assert.match(frame, /Esc twice/);
 
 		await setup.mockInput.typeText("/nope");
 		setup.mockInput.pressEnter();
@@ -302,6 +319,188 @@ test("io next app changes the working directory", { skip: !supported }, async ()
 
 		await app.shutdown(0);
 	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app arms Esc before interrupting a running turn", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 30 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	try {
+		session.hold = true;
+		await app.submit("keep working", "prompt");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /esc interrupt/);
+
+		setup.mockInput.pressEscape();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /esc again to interrupt/);
+		assert.equal(session.aborted, 0);
+
+		setup.mockInput.pressEscape();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await setup.flush();
+		assert.equal(session.aborted, 1);
+		assert.doesNotMatch(setup.captureCharFrame(), /esc again to interrupt/);
+
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app stashes and restores prompt drafts", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 26 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const composer = (app as unknown as { composer: { text: string; setText: (value: string) => void } }).composer;
+	try {
+		composer.setText("draft prompt");
+		await app.submit("/stash", "command");
+		assert.equal(composer.text, "");
+
+		await app.submit("/stash list", "command");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /1\. draft prompt/);
+
+		await app.submit("/stash pop", "command");
+		assert.equal(composer.text, "draft prompt");
+
+		composer.setText("key draft");
+		setup.mockInput.pressKey("x", { ctrl: true });
+		setup.mockInput.pressKey("j");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(composer.text, "");
+		setup.mockInput.pressKey("x", { ctrl: true });
+		setup.mockInput.pressKey("k");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(composer.text, "key draft");
+
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app renders todowrite results in the plan panel", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 28 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const handle = (app as unknown as { handleEvent: (event: IoEvent) => void }).handleEvent.bind(app);
+	try {
+		handle({ type: "tool_started", sessionID: "ses_2", toolCallID: "t1", name: "todowrite" });
+		handle({
+			type: "tool_called",
+			sessionID: "ses_2",
+			toolCallID: "t1",
+			input: {
+				todos: [
+					{ content: "inspect auth flow", status: "completed" },
+					{ content: "patch login", status: "in_progress" },
+					{ content: "run tests", status: "pending" },
+				],
+			},
+		});
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /\[x\] inspect auth flow/);
+		assert.match(frame, /\[~\] patch login/);
+		assert.match(frame, /\[ \] run tests/);
+
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app undoes and redoes the last user message", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 28 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	const composer = (app as unknown as { composer: { text: string } }).composer;
+	try {
+		session.messageList = [
+			{ id: "m1", role: "user", text: "first prompt", createdAt: 1 },
+			{ id: "m2", role: "assistant", text: "first answer", createdAt: 2 },
+		];
+		await app.submit("/undo", "command");
+		assert.equal(session.revert?.messageID, "m1");
+		assert.equal(composer.text, "first prompt");
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /first prompt/);
+
+		await app.submit("/redo", "command");
+		assert.equal(session.revert, undefined);
+
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app exports the session to markdown", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { readFileSync, unlinkSync } = await import("node:fs");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 26 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	const target = "/tmp/io-app-export-test.md";
+	try {
+		session.messageList = [
+			{ id: "m1", role: "user", text: "add oauth", createdAt: 1 },
+			{ id: "m2", role: "assistant", text: "Implemented.", createdAt: 2 },
+		];
+		await app.submit(`/export ${target}`, "command");
+		const markdown = readFileSync(target, "utf8");
+		assert.match(markdown, /# io session|# ses_/);
+		assert.match(markdown, /add oauth/);
+		assert.match(markdown, /Implemented\./);
+	} finally {
+		try {
+			unlinkSync(target);
+		} catch {
+			// Ignore cleanup when the export failed.
+		}
+		await app.shutdown(0);
 		await setup.dispose();
 	}
 });

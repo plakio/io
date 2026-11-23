@@ -89,9 +89,28 @@ test("io command palette filters and runs commands", { skip: !supported }, async
 		renderer: setup.renderer,
 		shell,
 		commands: [
-			{ id: "model", title: "Model picker", description: "Select a model", run: () => { hits.push("model"); } },
-			{ id: "session", title: "Session list", description: "Resume a session", run: () => { hits.push("session"); } },
-			{ id: "tps", title: "Toggle TPS", description: "Show tokens per second", run: () => { hits.push("tps"); } },
+			{
+				id: "model",
+				title: "Model picker",
+				description: "Select a model",
+				group: "Model",
+				suggested: true,
+				keys: ["<leader>m"],
+				run: () => {
+					hits.push("model");
+				},
+			},
+			{
+				id: "session",
+				title: "Session list",
+				description: "Resume a session",
+				group: "Session",
+				keys: ["<leader>l"],
+				run: () => {
+					hits.push("session");
+				},
+			},
+			{ id: "tps", title: "Toggle TPS", description: "Show tokens per second", group: "View", run: () => { hits.push("tps"); } },
 		],
 		onClose: () => {
 			closed += 1;
@@ -101,7 +120,9 @@ test("io command palette filters and runs commands", { skip: !supported }, async
 		palette.open();
 		await setup.renderOnce();
 		assert.match(setup.captureCharFrame(), /Commands/);
+		assert.match(setup.captureCharFrame(), /Suggested/);
 		assert.match(setup.captureCharFrame(), /Model picker/);
+		assert.match(setup.captureCharFrame(), /ctrl\+x m/);
 
 		palette.setQuery("session");
 		await setup.renderOnce();

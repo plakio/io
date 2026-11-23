@@ -1,5 +1,5 @@
  io 0.2.0 /home/oscar/project main                                                                         session 3f2a 
-   1 build    2 explore                                                                                                 
+   1 build ×    2 explore ×                                                                                             
  user                                                                                                                   
    refactor the auth flow                                                                                               
                                                                                                                         
@@ -16,8 +16,8 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Build · opencode/deepseek · effort high                                                                                
  Ask io…  (/help for commands)                                                                                          
                                                                                                                         
                                                                                                                         

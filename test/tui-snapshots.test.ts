@@ -35,6 +35,7 @@ test("io shell frame snapshots at 120 and 80 columns", { skip: !supported }, asy
 			shell.setTranscriptPlaceholder(
 				'user\n  refactor the auth flow\n\nassistant\n  I\'ll inspect the current implementation.\n\n  bash  $ rg "auth" src\n  src/auth.ts:42 ...',
 			);
+			shell.setComposerMetadata("Build · opencode/deepseek · effort high");
 			await setup.renderOnce();
 			const expected = readFileSync(new URL(`./fixtures/${fixture}`, import.meta.url), "utf8");
 			assert.equal(setup.captureCharFrame(), expected);

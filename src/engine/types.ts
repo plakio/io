@@ -82,10 +82,17 @@ export interface EngineAgent {
 	steps?: number;
 }
 
+export interface EngineRevert {
+	messageID: string;
+	files: readonly string[];
+}
+
 export interface EngineSessionSummary {
 	id: string;
 	title: string;
 	parentID?: string;
+	agent?: string;
+	busy?: boolean;
 	createdAt: number;
 	updatedAt: number;
 	directory?: string;
@@ -96,6 +103,8 @@ export interface EngineSessionListOptions {
 	directory?: string;
 	limit?: number;
 	search?: string;
+	/** `null` lists root sessions; a session ID lists its children. */
+	parentID?: string | null;
 }
 
 export interface EnginePromptOptions {
@@ -193,6 +202,8 @@ export interface EngineSession {
 	readonly id: string;
 	readonly model: EngineModelRef | undefined;
 	readonly agent: string | undefined;
+	readonly parentID: string | undefined;
+	readonly revert: EngineRevert | undefined;
 	subscribe(listener: (event: IoEvent) => void): () => void;
 	prompt(text: string, options?: EnginePromptOptions): Promise<void>;
 	abort(): Promise<void>;
@@ -201,6 +212,9 @@ export interface EngineSession {
 	setModel(model: EngineModelRef): Promise<void>;
 	setAgent(agentID: string): Promise<void>;
 	move(directory: string): Promise<void>;
+	stageRevert(messageID: string): Promise<void>;
+	clearRevert(): Promise<void>;
+	commitRevert(): Promise<void>;
 	respondPermission(requestID: string, decision: PermissionDecision, message?: string): Promise<void>;
 	setPermissions(permissions: readonly EnginePermissionRule[]): Promise<void>;
 	stats(): Promise<EngineStats>;

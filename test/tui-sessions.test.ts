@@ -26,6 +26,12 @@ test("io session tabs show root sessions and hide a single tab", { skip: !suppor
 		assert.match(frame, /Build auth/);
 		assert.match(frame, /Explore tests/);
 
+		const next = tabs.closeSlot(2);
+		assert.equal(next?.id, "ses_a");
+		assert.deepEqual(tabs.current.map((entry) => entry.id), ["ses_a"]);
+		await setup.renderOnce();
+		assert.doesNotMatch(setup.captureCharFrame(), /Explore tests/);
+
 		tabs.setSessions([session("ses_a", "Build auth")], "ses_a");
 		await setup.renderOnce();
 		assert.doesNotMatch(setup.captureCharFrame(), /Explore tests/);
