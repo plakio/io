@@ -112,7 +112,9 @@ run("node", ["scripts/collect-licenses.mjs", join(outDir, "THIRD_PARTY_NOTICES.t
 
 let smoke = { status: 0, stdout: "(cross build; smoke skipped)" };
 if (!crossBuild) {
-	smoke = spawnSync(wrapper, ["--version"], { cwd: outDir, encoding: "utf8" });
+	smoke = windows
+		? spawnSync("cmd.exe", ["/c", wrapper, "--version"], { cwd: outDir, encoding: "utf8" })
+		: spawnSync(wrapper, ["--version"], { cwd: outDir, encoding: "utf8" });
 	if (smoke.status !== 0) {
 		console.error(`build-next: smoke test failed (${smoke.status})\n${smoke.stderr ?? ""}`);
 		process.exit(1);
