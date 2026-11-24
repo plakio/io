@@ -308,16 +308,20 @@ export class IoModelPicker {
 				const favorite = this.favorites.has(key) ? "★" : " ";
 				const variant = model.variants.length > 0 ? this.variants.get(key) ?? model.variants[0] : "—";
 				const cost = model.cost ? `$${formatCost(model.cost.input)}/$${formatCost(model.cost.output)}` : "—";
-				this.list.add(
-					new TextRenderable(this.renderer, {
-						content: `${selected ? "›" : " "} ${favorite} ${current} ${model.name}  ctx ${formatContext(model.contextWindow)}  ${variant}  ${cost}`,
-						fg: selected ? this.theme.accent : this.theme.text,
-						bg: this.theme.panel,
-						height: 1,
-						wrapMode: "none",
-						truncate: true,
-					}),
-				);
+				const row = new TextRenderable(this.renderer, {
+					content: `${selected ? "›" : " "} ${favorite} ${current} ${model.name}  ctx ${formatContext(model.contextWindow)}  ${variant}  ${cost}`,
+					fg: selected ? this.theme.accent : this.theme.text,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					truncate: true,
+				});
+				row.onMouseDown = () => {
+					this.selected = index;
+					this.refresh();
+					this.selectCurrent();
+				};
+				this.list.add(row);
 			}
 		}
 		try {

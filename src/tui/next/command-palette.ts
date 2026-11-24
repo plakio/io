@@ -220,6 +220,7 @@ export class IoCommandPalette {
 	private commandRow(command: IoCommand, index: number): BoxRenderable {
 		const selected = index === this.selected;
 		const row = new BoxRenderable(this.renderer, {
+			id: `palette-${index}`,
 			flexDirection: "row",
 			height: 1,
 			backgroundColor: this.theme.panel,
@@ -247,6 +248,11 @@ export class IoCommandPalette {
 				}),
 			);
 		}
+		row.onMouseDown = () => {
+			this.selected = index;
+			this.refresh();
+			this.executeSelected();
+		};
 		row.add(new BoxRenderable(this.renderer, { flexGrow: 1, height: 1 }));
 		const keys = command.keys?.map((key) => key.replace(/^<leader>/, "ctrl+x ").replace(/^leader\+/, "ctrl+x+")).join(" ");
 		if (keys) {

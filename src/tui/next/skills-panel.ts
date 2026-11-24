@@ -155,15 +155,19 @@ export class IoSkillsPanel {
 		}
 		for (const [index, skill] of this.skills.entries()) {
 			const selected = index === this.selected;
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${skill.name}`,
-					fg: selected ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-				}),
-			);
+			const row = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${skill.name}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+			});
+			row.onMouseDown = () => {
+				this.selected = index;
+				this.refresh();
+				this.selectCurrent();
+			};
+			this.list.add(row);
 			if (skill.description) {
 				this.list.add(
 					new TextRenderable(this.renderer, {

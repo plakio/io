@@ -181,3 +181,34 @@ test("io keymap consumes real test-renderer key events", { skip: !supported }, a
 		await setup.dispose();
 	}
 });
+
+test("io command palette rows respond to mouse clicks", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoCommandPalette } = await import("../src/tui/next/command-palette.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 30 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	const hits: string[] = [];
+	const palette = new IoCommandPalette({
+		renderer: setup.renderer,
+		shell,
+		commands: [
+			{ id: "one", title: "First", description: "One", run: () => { hits.push("one"); } },
+			{ id: "two", title: "Second", description: "Two", run: () => { hits.push("two"); } },
+		],
+	});
+	try {
+		palette.open();
+		await setup.renderOnce();
+		const row = setup.renderer.root.findDescendantById("palette-1");
+		assert.ok(row);
+		await setup.mockMouse.click(row.screenX + 1, row.screenY);
+		assert.deepEqual(hits, ["two"]);
+		assert.equal(palette.isOpen, false);
+	} finally {
+		palette.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});

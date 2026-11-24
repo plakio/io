@@ -1459,7 +1459,7 @@ export class IoNextApp {
 	}
 
 	private async refreshSidebar(): Promise<void> {
-		if (!this.shell.isSidebarVisible) return;
+		if (this.disposed || !this.shell.isSidebarVisible) return;
 		const session = this.session;
 		if (!session) {
 			this.shell.setSidebar(["Session", " no active session"]);
@@ -1515,6 +1515,7 @@ export class IoNextApp {
 			lines.push("", "Update", ` io ${this.updateAvailable} available`, " /update to install");
 		}
 		lines.push("", "Queue", ` ${this.composer.queued.length} pending`);
+		if (this.disposed) return;
 		this.shell.setSidebar(lines);
 	}
 
@@ -1796,13 +1797,19 @@ export class IoNextApp {
 	}
 
 	private async openSessions(): Promise<void> {
-		this.sessionList = await this.options.engine.listSessions();
+		this.sessionList = await this.options.engine.listSessions({ directory: this.options.cwd, limit: 100 });
 		this.sessionSwitcher?.dispose();
 		this.sessionSwitcher = new IoSessionSwitcher({
 			renderer: this.options.renderer,
 			shell: this.shell,
 			sessions: this.sessionList,
 			activeID: this.session?.id,
+			onSearch: async (query) =>
+				this.options.engine.listSessions({ directory: this.options.cwd, search: query, limit: 100 }),
+			onArchive: async (entry) => {
+				await this.options.engine.archiveSession(entry.id, true);
+				this.toast(`archived ${shortSessionId(entry.id)}`, "success");
+			},
 			onSelect: async (entry) => {
 				const session = await this.options.engine.resumeSession(entry.id);
 				await this.attachSession(session);
@@ -1920,7 +1927,9 @@ export class IoNextApp {
 	}
 
 	private async refreshSessions(): Promise<void> {
+		if (this.disposed) return;
 		this.sessionList = await this.options.engine.listSessions({ directory: this.options.cwd });
+		if (this.disposed) return;
 		this.tabs.setSessions(this.sessionList, this.session?.id);
 	}
 
@@ -1986,6 +1995,7 @@ export class IoNextApp {
 	}
 
 	private async refreshFooter(): Promise<void> {
+		if (this.disposed) return;
 		const session = this.session;
 		const model = session?.model;
 		const branch = await getGitBranchAsync(this.options.cwd);
@@ -2013,6 +2023,7 @@ export class IoNextApp {
 			cost,
 			queue: this.composer.queued.length,
 		});
+		if (this.disposed) return;
 		this.shell.setHeader({ cwd: this.options.cwd, branch });
 		if (!this.busy) {
 			const metadata = [

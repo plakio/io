@@ -152,16 +152,20 @@ export class IoTimeline {
 		}
 		for (const [index, entry] of this.entries.entries()) {
 			const selected = index === this.selected;
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${index + 1}. ${entry.replace(/\s+/g, " ").trim()}`,
-					fg: selected ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-					truncate: true,
-				}),
-			);
+			const row = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${index + 1}. ${entry.replace(/\s+/g, " ").trim()}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				truncate: true,
+			});
+			row.onMouseDown = () => {
+				this.selected = index;
+				this.refresh();
+				this.selectCurrent();
+			};
+			this.list.add(row);
 		}
 		this.renderer.requestRender();
 	}

@@ -321,6 +321,7 @@ export interface AgentEngine {
 	listCommands(): Promise<readonly EngineCommand[]>;
 	listSavedPermissions(): Promise<readonly EngineSavedPermission[]>;
 	removeSavedPermission(id: string): Promise<void>;
+	archiveSession(sessionID: string, archived?: boolean): Promise<void>;
 	listWorktrees(): Promise<readonly EngineWorktree[]>;
 	createWorktree(name?: string): Promise<EngineWorktree>;
 	removeWorktree(directory: string, force?: boolean): Promise<void>;

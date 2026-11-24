@@ -301,14 +301,18 @@ export class IoFormSheet {
 		for (const [index, item] of this.fields.entries()) {
 			const active = index === this.index;
 			const value = formatValue(item, this.values[item.key]);
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${active ? "›" : " "} ${item.title ?? item.key}${item.required ? " *" : ""}: ${value}`,
-					fg: active ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					wrapMode: "word",
-				}),
-			);
+			const fieldRow = new TextRenderable(this.renderer, {
+				content: `${active ? "›" : " "} ${item.title ?? item.key}${item.required ? " *" : ""}: ${value}`,
+				fg: active ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				wrapMode: "word",
+			});
+			fieldRow.onMouseDown = () => {
+				this.index = index;
+				this.optionIndex = this.optionIndexFor(item);
+				this.render();
+			};
+			this.list.add(fieldRow);
 			if (active && item.description) {
 				this.list.add(
 					new TextRenderable(this.renderer, {
@@ -325,15 +329,22 @@ export class IoFormSheet {
 						item.type === "multiselect"
 							? Array.isArray(this.values[item.key]) && (this.values[item.key] as string[]).includes(option.value)
 							: optionIndex === this.optionIndex;
-					this.list.add(
-						new TextRenderable(this.renderer, {
-							content: `   ${selected ? "●" : "○"} ${option.label}`,
-							fg: optionIndex === this.optionIndex ? this.theme.accent : selected ? this.theme.success : this.theme.muted,
-							bg: this.theme.panel,
-							wrapMode: "none",
-							truncate: true,
-						}),
-					);
+					const optionRow = new TextRenderable(this.renderer, {
+						content: `   ${selected ? "●" : "○"} ${option.label}`,
+						fg: optionIndex === this.optionIndex ? this.theme.accent : selected ? this.theme.success : this.theme.muted,
+						bg: this.theme.panel,
+						wrapMode: "none",
+						truncate: true,
+					});
+					optionRow.onMouseDown = () => {
+						this.optionIndex = optionIndex;
+						if (item.type === "multiselect") this.toggle();
+						else {
+							this.values[item.key] = option.value;
+							this.render();
+						}
+					};
+					this.list.add(optionRow);
 				}
 			}
 			if (active && item.type === "external" && item.url) {

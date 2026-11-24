@@ -185,16 +185,20 @@ export class IoMcpPanel {
 					: server.status === "failed" || server.status === "needs_auth"
 						? this.theme.error
 						: this.theme.warning;
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${server.title ?? server.name}  ${server.status}`,
-					fg: selected ? this.theme.accent : color,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-					truncate: true,
-				}),
-			);
+			const row = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${server.title ?? server.name}  ${server.status}`,
+				fg: selected ? this.theme.accent : color,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				truncate: true,
+			});
+			row.onMouseDown = () => {
+				this.selected = index;
+				this.refreshRows();
+				void this.connectSelected();
+			};
+			this.list.add(row);
 		}
 		this.renderer.requestRender();
 	}

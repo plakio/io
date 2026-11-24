@@ -157,25 +157,31 @@ export class IoThemePicker {
 		clearChildren(this.list);
 		for (const [index, option] of this.options.entries()) {
 			const selected = index === this.selected;
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${option.label}`,
-					fg: selected ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-				}),
-			);
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `   ${option.description}`,
-					fg: this.theme.muted,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-					truncate: true,
-				}),
-			);
+			const select = () => {
+				this.selected = index;
+				this.refresh();
+				this.onPreview(option.id);
+				this.selectCurrent();
+			};
+			const label = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${option.label}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+			});
+			label.onMouseDown = select;
+			this.list.add(label);
+			const description = new TextRenderable(this.renderer, {
+				content: `   ${option.description}`,
+				fg: this.theme.muted,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				truncate: true,
+			});
+			description.onMouseDown = select;
+			this.list.add(description);
 		}
 		this.renderer.requestRender();
 	}

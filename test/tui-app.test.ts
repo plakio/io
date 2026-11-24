@@ -132,6 +132,7 @@ class FakeEngine implements AgentEngine {
 			},
 		];
 	}
+	async archiveSession(): Promise<void> {}
 	async listCommands(): Promise<readonly { name: string; description?: string }[]> {
 		return this.commandList;
 	}
@@ -387,6 +388,8 @@ test("io next app arms Esc before interrupting a running turn", { skip: !support
 		await setup.flush();
 		assert.equal(session.aborted, 1);
 		assert.doesNotMatch(setup.captureCharFrame(), /esc again to interrupt/);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		await setup.renderOnce();
 
 		await app.shutdown(0);
 	} finally {

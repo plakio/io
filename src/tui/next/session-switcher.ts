@@ -20,6 +20,8 @@ export interface IoSessionSwitcherOptions {
 	onRename?: (session: EngineSessionSummary, title: string) => void | Promise<void>;
 	onDelete?: (session: EngineSessionSummary) => void | Promise<void>;
 	onFork?: (session: EngineSessionSummary) => void | Promise<void>;
+	onArchive?: (session: EngineSessionSummary) => void | Promise<void>;
+	onSearch?: (query: string) => Promise<readonly EngineSessionSummary[]>;
 	onClose?: () => void;
 	onError?: (error: unknown) => void;
 }
@@ -31,7 +33,7 @@ export class IoSessionSwitcher {
 	private readonly theme: IoTheme;
 	private readonly callbacks: Pick<
 		IoSessionSwitcherOptions,
-		"onSelect" | "onRename" | "onDelete" | "onFork" | "onClose" | "onError"
+		"onSelect" | "onRename" | "onDelete" | "onFork" | "onArchive" | "onSearch" | "onClose" | "onError"
 	>;
 	private sessions: readonly EngineSessionSummary[];
 	private activeID: string | undefined;
@@ -44,6 +46,7 @@ export class IoSessionSwitcher {
 	private selected = 0;
 	private opened = false;
 	private renaming = false;
+	private searchTimer: NodeJS.Timeout | undefined;
 	private readonly keyHandler: (event: IoKeyEvent) => void;
 
 	constructor(options: IoSessionSwitcherOptions) {
@@ -81,6 +84,8 @@ export class IoSessionSwitcher {
 		if (!this.opened) return;
 		this.opened = false;
 		this.renaming = false;
+		if (this.searchTimer !== undefined) clearTimeout(this.searchTimer);
+		this.searchTimer = undefined;
 		this.renderer.keyInput.off("keypress", this.keyHandler);
 		this.input = undefined;
 		this.list = undefined;
@@ -109,6 +114,7 @@ export class IoSessionSwitcher {
 		if (!this.input) return;
 		this.input.value = query;
 		this.refresh();
+		this.scheduleSearch(query);
 	}
 
 	move(delta: number): void {
@@ -129,6 +135,15 @@ export class IoSessionSwitcher {
 		const session = this.selectedSession;
 		if (!session) return false;
 		await this.callbacks.onDelete?.(session);
+		this.sessions = this.sessions.filter((entry) => entry.id !== session.id);
+		this.refresh();
+		return true;
+	}
+
+	async archiveSelected(): Promise<boolean> {
+		const session = this.selectedSession;
+		if (!session) return false;
+		await this.callbacks.onArchive?.(session);
 		this.sessions = this.sessions.filter((entry) => entry.id !== session.id);
 		this.refresh();
 		return true;
@@ -202,6 +217,7 @@ export class IoSessionSwitcher {
 		else if (event.ctrl && name === "r") this.startRename();
 		else if (event.ctrl && name === "d") void this.deleteSelected();
 		else if (event.ctrl && name === "f") void this.forkSelected();
+		else if (event.ctrl && name === "a") void this.archiveSelected();
 		else return;
 		event.preventDefault?.();
 		event.stopPropagation?.();
@@ -231,7 +247,10 @@ export class IoSessionSwitcher {
 			focusedTextColor: this.theme.text,
 			placeholderColor: this.theme.muted,
 		});
-		input.onContentChange = () => this.refresh();
+		input.onContentChange = () => {
+			this.refresh();
+			this.scheduleSearch(input.value);
+		};
 		const list = new ScrollBoxRenderable(this.renderer, {
 			flexGrow: 1,
 			flexShrink: 1,
@@ -266,7 +285,7 @@ export class IoSessionSwitcher {
 			}),
 		);
 		const hint = new TextRenderable(this.renderer, {
-			content: "↑↓ move · enter resume · ctrl+r rename · ctrl+d delete · ctrl+f fork",
+			content: "↑↓ move · enter resume · ctrl+r rename · ctrl+d delete · ctrl+f fork · ctrl+a archive",
 			fg: this.theme.muted,
 			bg: this.theme.panel,
 			height: 1,
@@ -304,16 +323,21 @@ export class IoSessionSwitcher {
 				const selected = index === this.selected;
 				const active = session.id === this.activeID ? "●" : " ";
 				const date = new Date(session.updatedAt).toISOString().slice(0, 10);
-				this.list?.add(
-					new TextRenderable(this.renderer, {
-						content: `${selected ? "›" : " "} ${active} ${session.title}  ${session.id.slice(0, 6)}  ${date}`,
-						fg: selected ? this.theme.accent : this.theme.text,
-						bg: this.theme.panel,
-						height: 1,
-						wrapMode: "none",
-						truncate: true,
-					}),
-				);
+				const row = new TextRenderable(this.renderer, {
+					id: `session-row-${index}`,
+					content: `${selected ? "›" : " "} ${active} ${session.title}  ${session.id.slice(0, 6)}  ${date}`,
+					fg: selected ? this.theme.accent : this.theme.text,
+					bg: this.theme.panel,
+					height: 1,
+					wrapMode: "none",
+					truncate: true,
+				});
+				row.onMouseDown = () => {
+					this.selected = index;
+					this.refresh();
+					this.selectCurrent();
+				};
+				this.list?.add(row);
 			});
 		}
 		try {
@@ -322,6 +346,21 @@ export class IoSessionSwitcher {
 			// Layout may not be ready during the first refresh.
 		}
 		this.renderer.requestRender();
+	}
+
+	private scheduleSearch(query: string): void {
+		if (!this.callbacks.onSearch) return;
+		if (this.searchTimer !== undefined) clearTimeout(this.searchTimer);
+		const value = query.trim();
+		if (value.length < 2) return;
+		this.searchTimer = setTimeout(() => {
+			void this.callbacks.onSearch?.(value).then((results) => {
+				if (!this.opened || this.input?.value.trim() !== value) return;
+				this.sessions = results;
+				this.refresh();
+			});
+		}, 250);
+		this.searchTimer.unref?.();
 	}
 
 	private filter(query: string): readonly EngineSessionSummary[] {

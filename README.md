@@ -168,6 +168,7 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+X e` | Edit prompt in `$EDITOR` |
 | `Ctrl+X j` / `k` | Stash / restore draft |
 | `Ctrl+F` | Pin or unpin the session tab |
+| `Ctrl+A` | Archive the selected session (session list) |
 | `Ctrl+X ↓` / `↑` | Subagents / parent session |
 | `Ctrl+1…9` | Switch session tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session tab |
@@ -176,7 +177,7 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 
 Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `s` status, `g` timeline, `u`/`r` undo/redo, `y` copy, `e` editor, `j`/`k` stash, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
 
-Tabs can be switched by clicking them; the `×` closes the tab without deleting the session. Set `IO_NOTIFY=1` to receive a terminal notification when a turn ends.
+Tabs can be switched by clicking them; the `×` closes the tab without deleting the session. Rows in palette, sessions, models, agents, timeline, MCP, skills, settings, themes and forms are clickable too. Set `IO_NOTIFY=1` to receive a terminal notification when a turn ends.
 
 Typing `/` opens the command menu with descriptions. Typing `@` completes workspace paths and subagents. Selecting a model with reasoning variants opens the effort step (`Default`, `low`, `medium`, `high`, …). Consecutive tool calls are grouped under a `tools · N` header; click it to collapse the group.
 

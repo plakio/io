@@ -152,15 +152,19 @@ export class IoSettingsPanel {
 		for (const [index, row] of this.rows.entries()) {
 			const selected = index === this.selected;
 			const label = row.label.padEnd(16);
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${label} ${row.value}`,
-					fg: selected ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-				}),
-			);
+			const text = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${label} ${row.value}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+			});
+			text.onMouseDown = () => {
+				this.selected = index;
+				this.refresh();
+				this.activate();
+			};
+			this.list.add(text);
 		}
 		this.renderer.requestRender();
 	}

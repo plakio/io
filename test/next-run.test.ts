@@ -136,6 +136,7 @@ class FakeRunEngine implements AgentEngine {
 	async listModels(): Promise<readonly EngineModel[]> {
 		return [model];
 	}
+	async archiveSession(): Promise<void> {}
 	async listCommands(): Promise<readonly never[]> {
 		return [];
 	}

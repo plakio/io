@@ -529,6 +529,10 @@ export class OpenCodeEngine implements AgentEngine {
 		await this.host.sessions.update({ sessionID, title });
 	}
 
+	async archiveSession(sessionID: string, archived = true): Promise<void> {
+		await this.host.sessions.update({ sessionID, archived });
+	}
+
 	async deleteSession(sessionID: string): Promise<void> {
 		await this.host.sessions.remove({ sessionID });
 	}

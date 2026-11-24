@@ -110,3 +110,73 @@ test("io session switcher filters, resumes, renames, deletes and forks", { skip:
 		await setup.dispose();
 	}
 });
+
+test("io session switcher rows respond to mouse clicks", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoSessionSwitcher } = await import("../src/tui/next/session-switcher.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 28 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	let selected: string | undefined;
+	const switcher = new IoSessionSwitcher({
+		renderer: setup.renderer,
+		shell,
+		sessions: [session("ses_alpha", "Build auth"), session("ses_beta", "Explore tests")],
+		activeID: "ses_alpha",
+		onSelect: (entry) => {
+			selected = entry.id;
+		},
+	});
+	try {
+		switcher.open();
+		await setup.renderOnce();
+		const row = setup.renderer.root.findDescendantById("session-row-1");
+		assert.ok(row);
+		await setup.mockMouse.click(row.screenX + 1, row.screenY);
+		assert.equal(selected, "ses_beta");
+		assert.equal(switcher.isOpen, false);
+	} finally {
+		switcher.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});
+
+test("io session switcher searches on the server and archives", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoSessionSwitcher } = await import("../src/tui/next/session-switcher.js");
+
+	const setup = await createTestRenderer({ width: 110, height: 28 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	const queries: string[] = [];
+	const archived: string[] = [];
+	const switcher = new IoSessionSwitcher({
+		renderer: setup.renderer,
+		shell,
+		sessions: [session("ses_alpha", "Build auth")],
+		activeID: "ses_alpha",
+		onSelect: () => undefined,
+		onSearch: async (query) => {
+			queries.push(query);
+			return [session("ses_beta", "Explore tests")];
+		},
+		onArchive: async (entry) => {
+			archived.push(entry.id);
+		},
+	});
+	try {
+		switcher.open();
+		switcher.setQuery("explore");
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		assert.deepEqual(queries, ["explore"]);
+		assert.equal(switcher.selectedSession?.id, "ses_beta");
+		await switcher.archiveSelected();
+		assert.deepEqual(archived, ["ses_beta"]);
+	} finally {
+		switcher.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});

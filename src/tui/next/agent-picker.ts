@@ -176,16 +176,20 @@ export class IoAgentPicker {
 			const selected = index === this.selected;
 			const current = agent.id === this.current ? "●" : " ";
 			const description = agent.description ? `  ${agent.description}` : "";
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${current} ${agent.name}${description}`,
-					fg: selected ? this.theme.accent : this.theme.text,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-					truncate: true,
-				}),
-			);
+			const row = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${current} ${agent.name}${description}`,
+				fg: selected ? this.theme.accent : this.theme.text,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				truncate: true,
+			});
+			row.onMouseDown = () => {
+				this.selected = index;
+				this.refresh();
+				this.selectCurrent();
+			};
+			this.list.add(row);
 		}
 		this.renderer.requestRender();
 	}

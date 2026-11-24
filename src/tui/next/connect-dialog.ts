@@ -309,16 +309,19 @@ export class IoConnectDialog {
 				: entry.integration?.methods.some((item) => item.type === "env")
 					? "env"
 					: "key";
-			this.list.add(
-				new TextRenderable(this.renderer, {
-					content: `${selected ? "›" : " "} ${entry.name.padEnd(28)} ${state}  ${method}`,
-					fg: selected ? this.theme.accent : entry.configured ? this.theme.text : this.theme.muted,
-					bg: this.theme.panel,
-					height: 1,
-					wrapMode: "none",
-					truncate: true,
-				}),
-			);
+			const row = new TextRenderable(this.renderer, {
+				content: `${selected ? "›" : " "} ${entry.name.padEnd(28)} ${state}  ${method}`,
+				fg: selected ? this.theme.accent : entry.configured ? this.theme.text : this.theme.muted,
+				bg: this.theme.panel,
+				height: 1,
+				wrapMode: "none",
+				truncate: true,
+			});
+			row.onMouseDown = () => {
+				this.selected = index;
+				this.renderList();
+			};
+			this.list.add(row);
 		}
 		this.renderer.requestRender();
 	}
