@@ -136,6 +136,9 @@ export class IoTerminalPane {
 }
 
 function defaultSpawn(input: { cwd: string; cols: number; rows: number }): PtyProcess {
+	if (process.platform === "win32") {
+		throw new Error("the embedded terminal is not supported on Windows yet");
+	}
 	const shell = process.env.SHELL || "/bin/sh";
 	const args =
 		process.platform === "darwin"

@@ -14,7 +14,8 @@ The shell runs with your user permissions. IO's permission rules are a speed bum
 
 ## Requirements
 
-- macOS ARM64/x64 or Linux ARM64/x64.
+- macOS ARM64/x64, Linux ARM64/x64 or Windows x64/ARM64.
+- The embedded terminal is currently Linux/macOS only.
 - Bun 1.3.14+ to run the distributed binary, or Node.js 26.4+ with `--experimental-ffi` to run the source.
 - Git for `/diff` and git workflows.
 
@@ -240,6 +241,17 @@ io registers OpenCode's built-in agents on the embedded host:
 | `summary` | hidden | Conversation summaries |
 
 `/agent`, `Ctrl+X a` or `Shift+Tab` select a primary agent. `/agents` lists every agent, including subagents and hidden maintenance agents.
+
+## Remote OpenCode
+
+Attach to an existing OpenCode server instead of starting the embedded host:
+
+```bash
+io --server http://127.0.0.1:4096
+io --server https://opencode.example --server-token "$TOKEN" run "check the tests"
+```
+
+`IO_SERVER_URL` and `IO_SERVER_TOKEN` are also supported. In remote mode the server owns providers, auth, sessions and tools; `/connect` is disabled.
 
 ## Extensibility
 

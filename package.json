@@ -22,6 +22,7 @@
     "test:ui:bun": "bun test test/tui-*.test.ts --timeout 20000"
   },
   "dependencies": {
+    "@opencode/client": "^2.3.2",
     "@opencode/core": "2.3.2",
     "@opencode/plugin": "2.3.2",
     "@opencode/sdk": "2.3.2",

@@ -64,6 +64,7 @@ export interface IoNextAppOptions {
 	renderer: CliRenderer;
 	engine: AgentEngine;
 	paths?: IoPaths;
+	remote?: boolean;
 	appearance?: IoAppearanceConfig;
 	sessionID?: string;
 	model?: EngineModelRef;
@@ -1549,6 +1550,10 @@ export class IoNextApp {
 	}
 
 	private async openConnect(): Promise<void> {
+		if (this.options.remote) {
+			this.toast("auth is managed by the remote OpenCode server", "info");
+			return;
+		}
 		const paths = this.options.paths;
 		if (!paths) {
 			this.toast("auth is unavailable in this session", "warning");
@@ -2213,6 +2218,7 @@ export interface IoNextAppFromPathsOptions {
 	cwd: string;
 	paths: IoPaths;
 	renderer: CliRenderer;
+	server?: { url: string; token?: string };
 	appearance?: IoAppearanceConfig;
 	sessionID?: string;
 	model?: EngineModelRef;
@@ -2224,6 +2230,7 @@ export interface IoEngineFromPathsOptions {
 	cwd: string;
 	paths: IoPaths;
 	envNames?: readonly string[];
+	server?: { url: string; token?: string };
 }
 
 /** Build the embedded OpenCode engine with io's shell and storage. */
@@ -2231,10 +2238,14 @@ export async function createIoEngine(options: IoEngineFromPathsOptions): Promise
 	ensureIoDirectories(options.paths);
 	const models = syncModelsConfig(options.paths);
 	for (const warning of models.warnings) process.stderr.write(`io: ${warning}\n`);
+	const server = options.server ?? (process.env.IO_SERVER_URL
+		? { url: process.env.IO_SERVER_URL, token: process.env.IO_SERVER_TOKEN }
+		: undefined);
 	const engine = await OpenCodeEngine.create({
 		cwd: options.cwd,
 		configDir: join(options.paths.configDir, "opencode"),
 		databasePath: join(options.paths.dataDir, "opencode.db"),
+		...(server ? { server } : {}),
 		plugins: [createIoSecurityPlugin({ cwd: options.cwd, envNames: options.envNames })],
 	});
 	// Wait for the built-in agent plugin so title/compaction/summary and the
@@ -2251,6 +2262,7 @@ export async function createIoNextApp(options: IoNextAppFromPathsOptions): Promi
 		renderer: options.renderer,
 		engine,
 		paths: options.paths,
+		remote: Boolean(options.server ?? process.env.IO_SERVER_URL),
 		appearance: options.appearance,
 		sessionID: options.sessionID,
 		model: options.model,

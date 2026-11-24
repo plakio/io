@@ -155,3 +155,51 @@ test("OpenCode engine translates tool events and permission requests", { skip: !
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("OpenCode engine can attach to a remote server", { skip: !supported }, async () => {
+	const { createServer } = await import("node:http");
+	const { OpenCodeEngine } = await import("../src/engine/opencode.js");
+	const root = mkdtempSync(join(tmpdir(), "io-remote-"));
+	const server = createServer((request, response) => {
+		const url = new URL(request.url ?? "/", "http://localhost");
+		response.setHeader("content-type", "application/json");
+		if (url.pathname.startsWith("/api/model")) {
+			response.end(
+				JSON.stringify({
+					location: { directory: root, project: { id: "proj", directory: root, canonical: root } },
+					data: [
+						{
+							id: "remote-1",
+							providerID: "remote",
+							name: "Remote Model",
+							limit: { context: 1000, output: 100 },
+							capabilities: { input: ["text"], output: ["text"] },
+							variants: [],
+							cost: [],
+						},
+					],
+				}),
+			);
+			return;
+		}
+		response.statusCode = 404;
+		response.end(JSON.stringify({ message: "not found" }));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	const port = typeof address === "object" && address ? address.port : 0;
+	const engine = await OpenCodeEngine.create({
+		cwd: root,
+		configDir: join(root, "config"),
+		databasePath: join(root, "db", "opencode.db"),
+		server: { url: `http://127.0.0.1:${port}` },
+	});
+	try {
+		const models = await engine.listModels();
+		assert.ok(models.some((model) => model.provider === "remote" && model.id === "remote-1"));
+	} finally {
+		await engine.close();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+		rmSync(root, { recursive: true, force: true });
+	}
+});

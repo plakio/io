@@ -10,6 +10,8 @@ This document covers the `io` build that embeds **OpenCode** and **OpenTUI**. Th
 dist-next/
   io                     POSIX wrapper; sets NODE_PATH and execs io.bin
   io.bin                 Bun-compiled executable
+  io.cmd                 Windows wrapper; execs io.bin.exe
+  io.bin.exe             Bun-compiled Windows executable
   node_modules/
     @opencode/pty-*/     native PTY sidecar required by OpenCode
   THIRD_PARTY_NOTICES.txt
@@ -23,6 +25,7 @@ The wrapper resolves its own symlink, points `NODE_PATH` at the adjacent `node_m
 
 - Bun 1.3.14+ to run the compiled binary.
 - The binary embeds the OpenTUI native library and assets.
+- Windows uses `io.cmd` + `io.bin.exe`; the embedded terminal currently requires `script` and is disabled there.
 - OpenCode's PTY package remains a sidecar (`~3 MB`).
 - Node.js 26.4+ with `--experimental-ffi` is only needed to run the TypeScript source, not the compiled binary.
 
@@ -40,12 +43,16 @@ node scripts/build-next.mjs --target=bun-linux-arm64
 node scripts/build-next.mjs --target=bun-linux-x64
 node scripts/build-next.mjs --target=bun-darwin-arm64
 node scripts/build-next.mjs --target=bun-darwin-x64
+node scripts/build-next.mjs --target=win32-x64
+node scripts/build-next.mjs --target=win32-arm64
 ```
 
 Cross-target builds require the matching optional packages:
 
 ```bash
 npm install --no-save @opentui/core-linux-x64 @opencode/pty-linux-x64-gnu
+# Windows
+npm install --no-save --force --os=win32 --cpu=x64 @opentui/core-win32-x64 @opencode/pty-win32-x64
 ```
 
 `build:next` checks both before compiling. The current release matrix must be built on each target or with all optional packages installed.

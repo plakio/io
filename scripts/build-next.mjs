@@ -18,6 +18,8 @@ const targets = {
 	"linux-x64": { bun: "bun-linux-x64", pty: "@opencode/pty-linux-x64-gnu", libc: "glibc", core: "@opentui/core-linux-x64" },
 	"darwin-arm64": { bun: "bun-darwin-arm64", pty: "@opencode/pty-darwin-arm64", core: "@opentui/core-darwin-arm64" },
 	"darwin-x64": { bun: "bun-darwin-x64", pty: "@opencode/pty-darwin-x64", core: "@opentui/core-darwin-x64" },
+	"win32-x64": { bun: "bun-windows-x64", pty: "@opencode/pty-win32-x64", core: "@opentui/core-win32-x64" },
+	"win32-arm64": { bun: "bun-windows-arm64", pty: "@opencode/pty-win32-arm64", core: "@opentui/core-win32-arm64" },
 };
 const requestedTarget = (targetArg ?? hostTarget).replace(/^bun-/, "");
 const target = targets[requestedTarget];
@@ -67,15 +69,23 @@ run("node", ["scripts/patch-opencode-ws.mjs"]);
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
-const output = join(outDir, "io.bin");
-const wrapper = join(outDir, "io");
+const windows = target.bun.includes("windows");
+const output = join(outDir, windows ? "io.bin.exe" : "io.bin");
+const wrapper = join(outDir, windows ? "io.cmd" : "io");
 const define = [["--define", `process.env.IO_VERSION="${packageVersion}"`]];
 if (target.libc) define.push(["--define", `process.env.OPENTUI_LIBC="${target.libc}"`]);
 run(bunPrefix[0], [...bunPrefix.slice(1), "build", "--compile", "src/cli.ts", "--outfile", output, `--target=${target.bun}`, ...define.flat()]);
-chmodSync(output, 0o755);
+if (!windows) chmodSync(output, 0o755);
 writeFileSync(
 	wrapper,
-	`#!/bin/sh
+	windows
+		? `@echo off
+setlocal
+set "DIR=%~dp0"
+set "NODE_PATH=%DIR%node_modules;%NODE_PATH%"
+"%DIR%io.bin.exe" %*
+`
+		: `#!/bin/sh
 SELF=$0
 while [ -L "$SELF" ]; do
   TARGET=$(readlink "$SELF")
@@ -88,7 +98,7 @@ DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
 NODE_PATH="$DIR/node_modules\${NODE_PATH:+:$NODE_PATH}" exec "$DIR/io.bin" "$@"
 `,
 );
-chmodSync(wrapper, 0o755);
+if (!windows) chmodSync(wrapper, 0o755);
 
 const ptyTarget = join(outDir, "node_modules", "@opencode", target.pty.split("/")[1]);
 mkdirSync(dirname(ptyTarget), { recursive: true });

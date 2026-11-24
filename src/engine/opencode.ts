@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Plugin as BuiltinAgentPlugin } from "@opencode/core/plugin/agent";
+import { OpenCode as OpenCodeClient } from "@opencode/client";
 import { OpenCode } from "@opencode/sdk";
 import type {
 	AgentEngine,
@@ -46,6 +47,8 @@ export interface OpenCodeEngineOptions {
 	plugins?: readonly unknown[];
 	/** Fetch models.dev on startup. Off by default to keep tests offline. */
 	fetchModels?: boolean;
+	/** Attach to an OpenCode server instead of starting the embedded host. */
+	server?: { url: string; token?: string };
 }
 
 function number(value: unknown): number {
@@ -282,6 +285,19 @@ export class OpenCodeEngine implements AgentEngine {
 	}
 
 	static async create(options: OpenCodeEngineOptions): Promise<OpenCodeEngine> {
+		if (options.server) {
+			const client = OpenCodeClient.make({
+				baseUrl: options.server.url,
+				headers: options.server.token ? { Authorization: `Bearer ${options.server.token}` } : undefined,
+			});
+			const host = {
+				...client,
+				sessions: client.session,
+				events: client.event,
+				close: async () => undefined,
+			} as unknown as OpenCodeHost;
+			return new OpenCodeEngine(host, options.cwd);
+		}
 		mkdirSync(options.configDir, { recursive: true, mode: 0o700 });
 		mkdirSync(dirname(options.databasePath), { recursive: true, mode: 0o700 });
 		const host = await OpenCode.create({

@@ -38,6 +38,11 @@ Run options:
   --fail-on-tool-error  Exit non-zero when a tool fails
   --no-stdin        Never wait for stdin
 
+Remote:
+  --server <url>    Attach to an OpenCode server instead of embedded
+  --server-token <token>  Bearer token for the remote server
+  IO_SERVER_URL / IO_SERVER_TOKEN also work
+
 Runtime:
   Bun 1.3.14+ or Node.js 26.4+ with --experimental-ffi.
 `;
@@ -280,6 +285,27 @@ async function runListCommand(command: "models" | "sessions", args: readonly str
 
 async function main(): Promise<number> {
 	const args = process.argv.slice(2);
+	for (let index = 0; index < args.length; index++) {
+		if (args[index] === "--server") {
+			const url = args[index + 1];
+			if (!url) {
+				process.stderr.write("io: --server expects a URL\n");
+				return 1;
+			}
+			process.env.IO_SERVER_URL = url;
+			args.splice(index, 2);
+			index -= 1;
+		} else if (args[index] === "--server-token") {
+			const token = args[index + 1];
+			if (!token) {
+				process.stderr.write("io: --server-token expects a value\n");
+				return 1;
+			}
+			process.env.IO_SERVER_TOKEN = token;
+			args.splice(index, 2);
+			index -= 1;
+		}
+	}
 	if (args.includes("--help") || args.includes("-h")) {
 		process.stdout.write(HELP);
 		return 0;

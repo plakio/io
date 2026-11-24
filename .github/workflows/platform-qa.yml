@@ -24,6 +24,8 @@ jobs:
             os: macos-15-intel
           - name: macos-arm64
             os: macos-15
+          - name: windows-x64
+            os: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -38,11 +40,21 @@ jobs:
       - name: Build the platform binary
         run: npm run build
       - name: Version and help
+        if: runner.os != 'Windows'
         run: |
           ./dist-next/io --version
           ./dist-next/io --help
       - name: Auth host loads
+        if: runner.os != 'Windows'
         run: ./dist-next/io auth status
+      - name: Version and help (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\dist-next\io.cmd --version
+          .\dist-next\io.cmd --help
+      - name: Auth host loads (Windows)
+        if: runner.os == 'Windows'
+        run: .\dist-next\io.cmd auth status
       - name: TUI starts (Linux)
         if: runner.os == 'Linux'
         run: |
