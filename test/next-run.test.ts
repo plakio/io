@@ -85,6 +85,10 @@ class FakeRunSession implements EngineSession {
 	async setModel(): Promise<void> {}
 	async setAgent(): Promise<void> {}
 	async move(): Promise<void> {}
+	async activateSkill(): Promise<void> {}
+	async runCommand(): Promise<void> {}
+	async replyForm(): Promise<void> {}
+	async cancelForm(): Promise<void> {}
 	async stageRevert(messageID: string): Promise<void> {
 		this.revert = { messageID, files: [] };
 	}
@@ -131,6 +135,31 @@ class FakeRunEngine implements AgentEngine {
 	readonly session = new FakeRunSession();
 	async listModels(): Promise<readonly EngineModel[]> {
 		return [model];
+	}
+	async listCommands(): Promise<readonly never[]> {
+		return [];
+	}
+	async listSavedPermissions(): Promise<readonly never[]> {
+		return [];
+	}
+	async removeSavedPermission(): Promise<void> {}
+	async listWorktrees(): Promise<readonly never[]> {
+		return [];
+	}
+	async createWorktree(): Promise<never> {
+		throw new Error("not supported");
+	}
+	async removeWorktree(): Promise<void> {}
+	async listMcp(): Promise<readonly never[]> {
+		return [];
+	}
+	async connectMcp(): Promise<void> {}
+	async disconnectMcp(): Promise<void> {}
+	async listSkills(): Promise<readonly never[]> {
+		return [];
+	}
+	async usage(): Promise<undefined> {
+		return undefined;
 	}
 	async listAgents(): Promise<readonly EngineAgent[]> {
 		return [{ id: "build", name: "Build", mode: "primary", hidden: false }];

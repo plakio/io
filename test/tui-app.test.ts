@@ -28,6 +28,8 @@ class FakeSession implements EngineSession {
 	parentID: string | undefined;
 	revert: { messageID: string; files: readonly string[] } | undefined;
 	messageList: EngineMessage[] = [];
+	lastPromptOptions: unknown;
+	lastCommand: { name: string; text: string } | undefined;
 	hold = false;
 	aborted = 0;
 	private listeners = new Set<(event: IoEvent) => void>();
@@ -43,7 +45,8 @@ class FakeSession implements EngineSession {
 		return () => this.listeners.delete(listener);
 	}
 
-	async prompt(text: string): Promise<void> {
+	async prompt(text: string, options?: unknown): Promise<void> {
+		this.lastPromptOptions = options;
 		const emit = (event: IoEvent) => {
 			for (const listener of this.listeners) listener(event);
 		};
@@ -69,6 +72,12 @@ class FakeSession implements EngineSession {
 		this.agent = agentID;
 	}
 	async move(): Promise<void> {}
+	async activateSkill(): Promise<void> {}
+	async runCommand(name: string, text: string): Promise<void> {
+		this.lastCommand = { name, text };
+	}
+	async replyForm(): Promise<void> {}
+	async cancelForm(): Promise<void> {}
 	async stageRevert(messageID: string): Promise<void> {
 		this.revert = { messageID, files: [] };
 	}
@@ -105,6 +114,7 @@ class FakeSession implements EngineSession {
 class FakeEngine implements AgentEngine {
 	readonly kind = "opencode" as const;
 	closed = false;
+	commandList: Array<{ name: string; description?: string }> = [];
 	sessions: FakeSession[] = [new FakeSession()];
 
 	async listModels(): Promise<readonly EngineModel[]> {
@@ -121,6 +131,31 @@ class FakeEngine implements AgentEngine {
 				output: ["text"],
 			},
 		];
+	}
+	async listCommands(): Promise<readonly { name: string; description?: string }[]> {
+		return this.commandList;
+	}
+	async listSavedPermissions(): Promise<readonly never[]> {
+		return [];
+	}
+	async removeSavedPermission(): Promise<void> {}
+	async listWorktrees(): Promise<readonly never[]> {
+		return [];
+	}
+	async createWorktree(): Promise<never> {
+		throw new Error("not supported");
+	}
+	async removeWorktree(): Promise<void> {}
+	async listMcp(): Promise<readonly never[]> {
+		return [];
+	}
+	async connectMcp(): Promise<void> {}
+	async disconnectMcp(): Promise<void> {}
+	async listSkills(): Promise<readonly never[]> {
+		return [];
+	}
+	async usage(): Promise<undefined> {
+		return undefined;
 	}
 	async listAgents(): Promise<readonly EngineAgent[]> {
 		return [
@@ -501,6 +536,120 @@ test("io next app exports the session to markdown", { skip: !supported }, async 
 			// Ignore cleanup when the export failed.
 		}
 		await app.shutdown(0);
+		await setup.dispose();
+	}
+});
+
+test("io next app passes @subagent mentions to the engine", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 26 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	try {
+		await app.submit("@general investigate the auth flow", "prompt");
+		assert.deepEqual((session.lastPromptOptions as { agents?: string[] }).agents, ["general"]);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await setup.renderOnce();
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app attaches files to the next prompt", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { writeFileSync, unlinkSync } = await import("node:fs");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 26 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	const target = "/tmp/io-attach-test.txt";
+	writeFileSync(target, "attached");
+	try {
+		await app.submit(`/attach ${target}`, "command");
+		await app.submit("read it", "prompt");
+		const files = (session.lastPromptOptions as { files?: Array<{ uri: string; name: string }> }).files;
+		assert.equal(files?.length, 1);
+		assert.equal(files?.[0]?.name, "io-attach-test.txt");
+		assert.match(files?.[0]?.uri ?? "", /^file:\/\//);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await setup.renderOnce();
+		await app.shutdown(0);
+	} finally {
+		try {
+			unlinkSync(target);
+		} catch {
+			// Ignore cleanup.
+		}
+		await setup.dispose();
+	}
+});
+
+test("io next app runs project markdown commands", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 26 });
+	const engine = new FakeEngine();
+	engine.commandList = [{ name: "hello", description: "Say hello" }];
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const session = app.currentSession as FakeSession;
+	try {
+		await app.submit("/hello world", "command");
+		assert.deepEqual(session.lastCommand, { name: "hello", text: "world" });
+		await app.shutdown(0);
+	} finally {
+		await setup.dispose();
+	}
+});
+
+test("io next app opens and closes agent form sheets", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoNextApp } = await import("../src/tui/next/app.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 28 });
+	const engine = new FakeEngine();
+	const app = await IoNextApp.create({
+		cwd: "/home/oscar/project",
+		renderer: setup.renderer,
+		engine,
+	});
+	const handle = (app as unknown as { handleEvent: (event: IoEvent) => void }).handleEvent.bind(app);
+	try {
+		handle({
+			type: "form_requested",
+			sessionID: "ses_2",
+			form: {
+				id: "form_1",
+				sessionID: "ses_2",
+				title: "Deployment",
+				fields: [{ key: "name", title: "Name", type: "string", required: true }],
+			},
+		});
+		await setup.renderOnce();
+		assert.match(setup.captureCharFrame(), /Deployment/);
+		handle({ type: "form_resolved", sessionID: "ses_2", formID: "form_1", status: "cancelled" });
+		await setup.renderOnce();
+		assert.doesNotMatch(setup.captureCharFrame(), /Deployment/);
+		await app.shutdown(0);
+	} finally {
 		await setup.dispose();
 	}
 });

@@ -144,3 +144,35 @@ test("io transcript highlights fenced code with the io palette", { skip: !suppor
 		await setup.dispose();
 	}
 });
+
+test("io transcript groups consecutive tool calls", { skip: !supported }, async () => {
+	const { createTestRenderer } = await import("@opentui/core/testing");
+	const { IoShell } = await import("../src/tui/next/shell.js");
+	const { IoTranscript } = await import("../src/tui/next/transcript.js");
+
+	const setup = await createTestRenderer({ width: 100, height: 24 });
+	const shell = new IoShell(setup.renderer, { cwd: "/home/oscar/project", version: "0.2.2" });
+	const transcript = new IoTranscript({ renderer: setup.renderer, container: shell.transcriptContainer });
+	try {
+		for (const id of ["t1", "t2"]) {
+			transcript.apply({ type: "tool_started", sessionID: "s", toolCallID: id, name: "grep" });
+			transcript.apply({ type: "tool_called", sessionID: "s", toolCallID: id, input: { pattern: "auth" } });
+			transcript.apply({
+				type: "tool_finished",
+				sessionID: "s",
+				toolCallID: id,
+				status: "success",
+				content: [{ type: "text", text: `result ${id}` }],
+			});
+		}
+		await setup.renderOnce();
+		const frame = setup.captureCharFrame();
+		assert.match(frame, /tools · 2/);
+		assert.match(frame, /result t1/);
+		assert.match(frame, /result t2/);
+	} finally {
+		transcript.dispose();
+		shell.dispose();
+		await setup.dispose();
+	}
+});

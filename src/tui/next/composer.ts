@@ -7,7 +7,7 @@ export interface IoCompletionItem {
 	/** Text inserted when the completion is accepted. */
 	value: string;
 	description?: string;
-	kind?: "command" | "path" | "model" | "session";
+	kind?: "command" | "path" | "model" | "session" | "agent";
 }
 
 export interface IoComposerOptions {

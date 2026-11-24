@@ -82,6 +82,82 @@ export interface EngineAgent {
 	steps?: number;
 }
 
+export type EngineFormValue = string | number | boolean | string[];
+
+export interface EngineFormOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+export interface EngineFormField {
+	key: string;
+	title?: string;
+	description?: string;
+	required?: boolean;
+	hidden?: boolean;
+	type: "string" | "number" | "integer" | "boolean" | "multiselect" | "external";
+	options?: readonly EngineFormOption[];
+	default?: EngineFormValue;
+	url?: string;
+}
+
+export interface EngineForm {
+	id: string;
+	sessionID: string;
+	title: string;
+	fields: readonly EngineFormField[];
+}
+
+export interface EngineCommand {
+	name: string;
+	description?: string;
+}
+
+export interface EngineSavedPermission {
+	id: string;
+	action: string;
+	resource: string;
+}
+
+export interface EngineWorktree {
+	directory: string;
+	strategy?: string;
+}
+
+export interface EngineMcpServer {
+	name: string;
+	status: string;
+	title?: string;
+}
+
+export interface EngineSkill {
+	id: string;
+	name: string;
+	description?: string;
+}
+
+export interface EngineUsageMeter {
+	percent: number;
+	limited: boolean;
+	resetsAt: number;
+}
+
+export interface EngineUsageBudget {
+	id: string;
+	limit: number;
+	spent: number;
+	resetsAt: number;
+}
+
+export interface EngineUsage {
+	workspace: string;
+	name?: string;
+	url?: string;
+	go?: { rolling: EngineUsageMeter; weekly: EngineUsageMeter; monthly: EngineUsageMeter };
+	budgets: readonly EngineUsageBudget[];
+}
+
 export interface EngineRevert {
 	messageID: string;
 	files: readonly string[];
@@ -107,11 +183,20 @@ export interface EngineSessionListOptions {
 	parentID?: string | null;
 }
 
+export interface EnginePromptFile {
+	uri: string;
+	name?: string;
+}
+
 export interface EnginePromptOptions {
 	/** `steer` interrupts/steers the active turn; `queue` waits for it to finish. */
 	delivery?: "steer" | "queue";
 	/** Wait for the turn to settle. Defaults to true when the session is idle. */
 	wait?: boolean;
+	/** Subagents referenced with @mentions in the prompt. */
+	agents?: readonly string[];
+	/** Files attached to the prompt. */
+	files?: readonly EnginePromptFile[];
 }
 
 export interface EnginePermissionRule {
@@ -195,6 +280,8 @@ export type IoEvent =
 	  }
 	| { type: "queue_changed"; sessionID: string; pending: number }
 	| { type: "usage_updated"; sessionID: string; tokens: EngineTokenUsage; cost: number }
+	| { type: "form_requested"; sessionID: string; form: EngineForm }
+	| { type: "form_resolved"; sessionID: string; formID: string; status: "answered" | "cancelled" }
 	| { type: "idle"; sessionID: string }
 	| { type: "error"; sessionID?: string; message: string };
 
@@ -213,6 +300,10 @@ export interface EngineSession {
 	setAgent(agentID: string): Promise<void>;
 	move(directory: string): Promise<void>;
 	stageRevert(messageID: string): Promise<void>;
+	activateSkill(skillID: string): Promise<void>;
+	runCommand(name: string, text: string): Promise<void>;
+	replyForm(formID: string, answer: Record<string, EngineFormValue>): Promise<void>;
+	cancelForm(formID: string, message?: string): Promise<void>;
 	clearRevert(): Promise<void>;
 	commitRevert(): Promise<void>;
 	respondPermission(requestID: string, decision: PermissionDecision, message?: string): Promise<void>;
@@ -227,6 +318,17 @@ export interface AgentEngine {
 	readonly kind: EngineKind;
 	listModels(): Promise<readonly EngineModel[]>;
 	listAgents(): Promise<readonly EngineAgent[]>;
+	listCommands(): Promise<readonly EngineCommand[]>;
+	listSavedPermissions(): Promise<readonly EngineSavedPermission[]>;
+	removeSavedPermission(id: string): Promise<void>;
+	listWorktrees(): Promise<readonly EngineWorktree[]>;
+	createWorktree(name?: string): Promise<EngineWorktree>;
+	removeWorktree(directory: string, force?: boolean): Promise<void>;
+	listMcp(): Promise<readonly EngineMcpServer[]>;
+	connectMcp(name: string): Promise<void>;
+	disconnectMcp(name: string): Promise<void>;
+	listSkills(): Promise<readonly EngineSkill[]>;
+	usage(): Promise<EngineUsage | undefined>;
 	createSession(options: EngineSessionOptions): Promise<EngineSession>;
 	resumeSession(sessionID: string): Promise<EngineSession>;
 	listSessions(options?: EngineSessionListOptions): Promise<readonly EngineSessionSummary[]>;

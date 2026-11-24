@@ -1,4 +1,5 @@
 import type { IoCommand } from "./keymap.js";
+import type { IoKeybindingOverrides } from "../../keybindings.js";
 
 /**
  * OpenCode-first defaults. `<leader>` expands to `Ctrl+X`.
@@ -6,6 +7,8 @@ import type { IoCommand } from "./keymap.js";
  */
 export const DEFAULT_KEYBINDINGS: Readonly<Record<string, readonly string[]>> = {
 	"command.palette.show": ["ctrl+p"],
+	"screen.clear": ["ctrl+l"],
+	"open.menu": ["ctrl+o"],
 	"composer.complete": ["tab"],
 	"model.list": ["<leader>m"],
 	"agent.list": ["<leader>a"],
@@ -33,6 +36,8 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<string, readonly string[]>> = 
 	"session.redo": ["<leader>r"],
 	"session.compact": ["<leader>c"],
 	"session.timeline": ["<leader>g"],
+	"session.pin.toggle": ["ctrl+f"],
+	"terminal.toggle": ["ctrl+x+ctrl+t"],
 	"sidebar.toggle": ["<leader>b"],
 	"status.show": ["<leader>s"],
 	"error.show": ["<leader>z"],
@@ -48,6 +53,11 @@ export const DEFAULT_KEYBINDINGS: Readonly<Record<string, readonly string[]>> = 
 	"verbosity.cycle": ["<leader>v"],
 	"tps.toggle": ["<leader>p"],
 	"theme.switch": ["<leader>h"],
+	"theme.list": [],
+	"settings.open": [],
+	"mcp.list": [],
+	"skills.list": [],
+	"usage.show": [],
 	"which-key.toggle": ["ctrl+alt+k"],
 	"app.exit": ["ctrl+c", "ctrl+d"],
 };
@@ -71,6 +81,8 @@ const TITLES: Readonly<Record<string, { title: string; description: string }>> =
 	"session.redo": { title: "Redo message", description: "Restore reverted messages" },
 	"session.compact": { title: "Compact context", description: "Summarize the current context" },
 	"session.timeline": { title: "Timeline", description: "Jump to an earlier user message" },
+	"session.pin.toggle": { title: "Pin session", description: "Pin or unpin the session tab" },
+	"terminal.toggle": { title: "Toggle terminal", description: "Open the embedded shell" },
 	"sidebar.toggle": { title: "Toggle sidebar", description: "Session, plan and subagents" },
 	"status.show": { title: "Show status", description: "Session, model, context and engine state" },
 	"error.show": { title: "Show last error", description: "Open the full error details" },
@@ -85,7 +97,14 @@ const TITLES: Readonly<Record<string, { title: string; description: string }>> =
 	"thinking.toggle": { title: "Toggle thinking", description: "Show or hide model reasoning" },
 	"verbosity.cycle": { title: "Cycle verbosity", description: "Low, normal, high or debug" },
 	"tps.toggle": { title: "Toggle tokens per second", description: "Show or hide output speed" },
-	"theme.switch": { title: "Switch theme", description: "Dark, light or system" },
+	"theme.switch": { title: "Theme picker", description: "Preview and switch themes" },
+	"theme.list": { title: "Theme picker", description: "Preview and switch themes" },
+	"settings.open": { title: "Settings", description: "Appearance and display preferences" },
+	"mcp.list": { title: "MCP servers", description: "Connect or disconnect MCP servers" },
+	"skills.list": { title: "Skills", description: "List and activate skills" },
+	"usage.show": { title: "Usage limits", description: "Show model usage limits" },
+	"screen.clear": { title: "Clear screen", description: "Clear the transcript view" },
+	"open.menu": { title: "Open sessions", description: "Resume a recent session" },
 	"which-key.toggle": { title: "Show keybindings", description: "Open the which-key panel" },
 	"app.exit": { title: "Exit io", description: "Close the current session" },
 };
@@ -109,6 +128,8 @@ const GROUPS: Readonly<Record<string, string>> = {
 	"session.child.previous": "Session",
 	"session.parent": "Session",
 	"session.timeline": "Session",
+	"session.pin.toggle": "Session",
+	"terminal.toggle": "View",
 	"sidebar.toggle": "View",
 	"status.show": "Session",
 	"error.show": "App",
@@ -124,6 +145,13 @@ const GROUPS: Readonly<Record<string, string>> = {
 	"verbosity.cycle": "View",
 	"tps.toggle": "View",
 	"theme.switch": "View",
+	"theme.list": "View",
+	"settings.open": "View",
+	"mcp.list": "Providers",
+	"skills.list": "Providers",
+	"usage.show": "Providers",
+	"screen.clear": "View",
+	"open.menu": "Session",
 	"app.exit": "App",
 };
 
@@ -137,8 +165,10 @@ const SUGGESTED = new Set([
 
 export function createIoCommands(
 	handlers: Partial<Record<string, () => void | Promise<void>>>,
+	overrides: IoKeybindingOverrides = {},
 ): IoCommand[] {
-	return Object.entries(DEFAULT_KEYBINDINGS).map(([id, keys]) => {
+	return Object.entries(DEFAULT_KEYBINDINGS).map(([id, defaultKeys]) => {
+		const keys = overrides[id] ?? defaultKeys;
 		const tab = /^session\.tab\.select\.(\d)$/.exec(id);
 		const meta = TITLES[id] ?? (tab
 			? { title: `Switch to tab ${tab[1]}`, description: "Switch session tab" }

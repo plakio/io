@@ -155,10 +155,11 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+C` twice | Exit when the prompt is empty |
 | `Ctrl+P` | Command palette |
 | `Ctrl+X` then key | Leader actions |
-| `Tab` | Complete a command |
-| `Ctrl+O` | Expand or collapse tool output (leader `o`) |
+| `Ctrl+X Ctrl+T` | Toggle embedded terminal |
 | `Ctrl+T` | Cycle model variants |
 | `Shift+Tab` | Cycle agents |
+| `Ctrl+L` | Clear the transcript view |
+| `Ctrl+O` | Recent sessions |
 | `Ctrl+X b` | Toggle sidebar |
 | `Ctrl+X g` | Session timeline |
 | `Ctrl+X s` | Status |
@@ -166,6 +167,7 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 | `Ctrl+X y` | Copy last message |
 | `Ctrl+X e` | Edit prompt in `$EDITOR` |
 | `Ctrl+X j` / `k` | Stash / restore draft |
+| `Ctrl+F` | Pin or unpin the session tab |
 | `Ctrl+X ↓` / `↑` | Subagents / parent session |
 | `Ctrl+1…9` | Switch session tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session tab |
@@ -174,9 +176,9 @@ Session data lives in IO's OpenCode database under `~/.local/share/io` (or `$XDG
 
 Leader actions include `m` models, `a` agents, `l` sessions, `n` new session, `c` compact, `d` diff, `q` queue, `s` status, `g` timeline, `u`/`r` undo/redo, `y` copy, `e` editor, `j`/`k` stash, `t` thinking, `v` verbosity, `p` tokens/second, `h` theme. `Ctrl+Alt+K` shows all bindings.
 
-Tabs can be switched by clicking them; the `×` closes the tab without deleting the session.
+Tabs can be switched by clicking them; the `×` closes the tab without deleting the session. Set `IO_NOTIFY=1` to receive a terminal notification when a turn ends.
 
-Typing `/` opens the command menu with descriptions. Typing `@` completes workspace paths. Selecting a model with reasoning variants opens the effort step (`Default`, `low`, `medium`, `high`, …).
+Typing `/` opens the command menu with descriptions. Typing `@` completes workspace paths and subagents. Selecting a model with reasoning variants opens the effort step (`Default`, `low`, `medium`, `high`, …). Consecutive tool calls are grouped under a `tools · N` header; click it to collapse the group.
 
 ## Session commands
 
@@ -193,6 +195,21 @@ Typing `/` opens the command menu with descriptions. Typing `@` completes worksp
 /continue        continue the latest session
 /cd [path]       show or change the working directory
 /status          session, model, context and engine state
+/theme           preview and switch themes
+/settings        appearance settings
+/clear           clear the transcript view
+/mcp             MCP servers: connect or disconnect
+/skills          list and activate skills
+/usage           model usage limits
+/attach <path>   attach a file to the next prompt
+/attachments     list attachments
+/detach          clear attachments
+/search <text>   search messages in this session
+/debug           engine diagnostics
+/pin             pin the current session tab
+/terminal        open the embedded shell
+/worktrees [list|new|switch|remove]  manage git worktrees
+/preview [path]  preview an image attachment
 /timeline        jump to an earlier user message
 /subagents       open a child session
 /stash [list|pop|clear]  stash or restore prompt drafts
@@ -222,6 +239,31 @@ io registers OpenCode's built-in agents on the embedded host:
 | `summary` | hidden | Conversation summaries |
 
 `/agent`, `Ctrl+X a` or `Shift+Tab` select a primary agent. `/agents` lists every agent, including subagents and hidden maintenance agents.
+
+## Extensibility
+
+Project configuration is loaded from `.opencode` in the working directory:
+
+| Path | Purpose |
+| --- | --- |
+| `.opencode/command/*.md` | Custom slash commands (`/name`) |
+| `.opencode/agent/*.md` | Custom primary agents and subagents |
+| `.opencode/skills/*/SKILL.md` | Project skills, listed by `/skills` |
+| `.opencode/tool/*.ts` | Project tools/plugins |
+| `~/.config/io/opencode/` | Global configuration, commands, agents and skills |
+
+Custom commands appear in Tab completion and `Ctrl+P`. Custom subagents can be referenced with `@name`. Agent questions render as a form sheet with text, number, boolean, single-select and multi-select fields.
+
+Saved permission rules can be inspected with `/permissions` and removed with `/permissions remove <id>`.
+
+Keybindings can be overridden in `~/.config/io/keybindings.json`:
+
+```json
+{
+  "model.list": "ctrl+m",
+  "session.new": ["ctrl+n", "ctrl+shift+n"]
+}
+```
 
 ## Configuration
 

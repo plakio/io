@@ -1,9 +1,12 @@
 import { statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { getTreeSitterClient, type CliRenderer } from "@opentui/core";
 import { getGitBranchAsync } from "../../git-diff.js";
 import {
 	ensureIoDirectories,
+	loadConfig,
+	saveConfig,
 	type IoAppearanceConfig,
 	type IoPaths,
 	type IoThemePreference,
@@ -14,6 +17,7 @@ import { createIoSecurityPlugin, runShellCommand } from "../../engine/shell-plug
 import type {
 	AgentEngine,
 	EngineAgent,
+	EngineCommand,
 	EngineModel,
 	EngineModelRef,
 	EnginePermissionRequest,
@@ -22,6 +26,7 @@ import type {
 	IoEvent,
 } from "../../engine/types.js";
 import { VERSION } from "../../version.js";
+import { loadKeybindings } from "../../keybindings.js";
 import { IoAgentPicker, selectableAgents } from "./agent-picker.js";
 import { IoAppearance } from "./appearance.js";
 import { IoAutocomplete } from "./autocomplete.js";
@@ -32,17 +37,24 @@ import { IoComposer, type IoCompletionItem } from "./composer.js";
 import { IoConnectDialog } from "./connect-dialog.js";
 import { IoDiffViewer } from "./diff-viewer.js";
 import { editText } from "./editor.js";
+import { IoFormSheet } from "./form-sheet.js";
 import { IoErrorPanel } from "./error-panel.js";
+import { IoImagePanel } from "./image-panel.js";
 import { sessionMarkdown } from "./export.js";
 import { IoKeymap } from "./keymap.js";
+import { IoMcpPanel } from "./mcp-panel.js";
 import { IoModelPicker } from "./model-picker.js";
 import { IoPermissionSheet } from "./permission-sheet.js";
 import { IoQueueManager } from "./queue-manager.js";
 import { IoSessionSwitcher } from "./session-switcher.js";
+import { IoSkillsPanel } from "./skills-panel.js";
 import { IoSessionTabs } from "./session-tabs.js";
 import { IoShell, type IoShellTodo } from "./shell.js";
 import { IoSubagentPicker } from "./subagent-picker.js";
+import { IoSettingsPanel, type IoSettingRow } from "./settings-panel.js";
 import { IoStatusPanel } from "./status-panel.js";
+import { IoTerminalPane } from "./terminal-pane.js";
+import { IoThemePicker, type IoThemeOption } from "./theme-picker.js";
 import { IoTimeline } from "./timeline.js";
 import { IoTranscript } from "./transcript.js";
 import { IoVariantPicker } from "./variant-picker.js";
@@ -69,12 +81,28 @@ const SLASH_COMMANDS: readonly IoCompletionItem[] = [
 	{ value: "/agents", description: "List agents and subagents", kind: "command" },
 	{ value: "/status", description: "Show session and engine status", kind: "command" },
 	{ value: "/subagents", description: "Open a child session", kind: "command" },
+	{ value: "/pin", description: "Pin or unpin the current session", kind: "command" },
 	{ value: "/timeline", description: "Jump to a previous user message", kind: "command" },
 	{ value: "/stash", description: "Stash, list or restore prompt drafts", kind: "command" },
 	{ value: "/error", description: "Show the last error in full", kind: "command" },
 	{ value: "/copy", description: "Copy the last message or session ID", kind: "command" },
 	{ value: "/export", description: "Export the session to Markdown", kind: "command" },
 	{ value: "/edit", description: "Edit the prompt in $EDITOR", kind: "command" },
+	{ value: "/theme", description: "Preview and switch themes", kind: "command" },
+	{ value: "/settings", description: "Change appearance settings", kind: "command" },
+	{ value: "/clear", description: "Clear the transcript view", kind: "command" },
+	{ value: "/mcp", description: "List MCP servers and reconnect", kind: "command" },
+	{ value: "/skills", description: "List and activate skills", kind: "command" },
+	{ value: "/usage", description: "Show model usage limits", kind: "command" },
+	{ value: "/attach", description: "Attach a file to the next prompt", kind: "command" },
+	{ value: "/attachments", description: "List prompt attachments", kind: "command" },
+	{ value: "/detach", description: "Clear prompt attachments", kind: "command" },
+	{ value: "/search", description: "Search messages in this session", kind: "command" },
+	{ value: "/debug", description: "Show engine diagnostics", kind: "command" },
+	{ value: "/permissions", description: "List or remove saved permission rules", kind: "command" },
+	{ value: "/terminal", description: "Open the embedded terminal", kind: "command" },
+	{ value: "/worktrees", description: "List git worktrees", kind: "command" },
+	{ value: "/preview", description: "Preview an image attachment", kind: "command" },
 	{ value: "/undo", description: "Revert the last user message", kind: "command" },
 	{ value: "/redo", description: "Restore reverted messages", kind: "command" },
 	{ value: "/agent", description: "Select the primary agent", kind: "command" },
@@ -98,12 +126,29 @@ const HELP = `Commands
   /agents        List agents and subagents
   /status        Show session and engine status
   /subagents     Open a child session
+  /pin           Pin or unpin the current session
   /timeline      Jump to a previous user message
   /stash [list|pop|clear]  Stash or restore prompt drafts
   /error         Show the last error in full
   /copy [id]     Copy the last message or session ID
   /export [path] Export the session to Markdown
   /edit          Edit the prompt in $EDITOR
+  /theme         Preview and switch themes
+  /settings      Change appearance settings
+  /clear         Clear the transcript view
+  /mcp           List MCP servers and reconnect
+  /skills        List and activate skills
+  /usage         Show model usage limits
+  /attach <path> Attach a file to the next prompt
+  /attachments   List prompt attachments
+  /detach        Clear prompt attachments
+  /detach        Clear prompt attachments
+  /search <text> Search messages in this session
+  /debug         Show engine diagnostics
+  /permissions [remove <id>]  List or remove saved permission rules
+  /terminal      Open the embedded terminal
+  /worktrees     List, create and switch git worktrees
+  /preview [path] Preview an image attachment
   /undo          Revert the last user message
   /redo          Restore reverted messages
   /agent         Select the primary agent
@@ -123,6 +168,9 @@ Keys
   Ctrl+J         Insert a new line
   Tab            Complete a command
   Ctrl+P         Command palette
+  Ctrl+L         Clear screen
+  Ctrl+O         Recent sessions
+  Ctrl+F         Pin session
   Ctrl+X m       Models
   Ctrl+X a       Agents
   Ctrl+X l       Sessions
@@ -162,12 +210,22 @@ export class IoNextApp {
 	private unsubscribe: (() => void) | undefined;
 	private sessionList: readonly EngineSessionSummary[] = [];
 	private agentList: readonly EngineAgent[] = [];
+	private commandList: readonly EngineCommand[] = [];
 	private palette: IoCommandPalette | undefined;
 	private agentPicker: IoAgentPicker | undefined;
 	private connectDialog: IoConnectDialog | undefined;
 	private statusPanel: IoStatusPanel | undefined;
 	private timeline: IoTimeline | undefined;
 	private subagentPicker: IoSubagentPicker | undefined;
+	private themePicker: IoThemePicker | undefined;
+	private settingsPanel: IoSettingsPanel | undefined;
+	private mcpPanel: IoMcpPanel | undefined;
+	private skillsPanel: IoSkillsPanel | undefined;
+	private terminalPane: IoTerminalPane | undefined;
+	private imagePanel: IoImagePanel | undefined;
+	private formSheet: IoFormSheet | undefined;
+	private activeFormID: string | undefined;
+	private updateAvailable: string | undefined;
 	private modelPicker: IoModelPicker | undefined;
 	private variantPicker: IoVariantPicker | undefined;
 	private sessionSwitcher: IoSessionSwitcher | undefined;
@@ -178,6 +236,7 @@ export class IoNextApp {
 	private toolOutputExpanded = false;
 	private todos: readonly IoShellTodo[] = [];
 	private stashes: string[] = [];
+	private attachments: string[] = [];
 	private lastError: string | undefined;
 	private errorPanel: IoErrorPanel | undefined;
 	private readonly todoToolCalls = new Set<string>();
@@ -215,6 +274,7 @@ export class IoNextApp {
 			shell: this.shell,
 			completions: SLASH_COMMANDS,
 			cwd: () => this.options.cwd,
+			agents: () => this.agentList.filter((agent) => !agent.hidden && agent.mode !== "primary"),
 			onAccept: (text) => {
 				this.composer.setText(text);
 				this.shell.focusComposer();
@@ -236,7 +296,10 @@ export class IoNextApp {
 		this.exitPromise = new Promise((resolve) => {
 			this.resolveExit = resolve;
 		});
-		this.commands = createIoCommands(this.commandHandlers());
+		this.commands = createIoCommands(
+			this.commandHandlers(),
+			options.paths ? loadKeybindings(options.paths) : {},
+		);
 		this.keymap = new IoKeymap({
 			renderer: options.renderer,
 			shell: this.shell,
@@ -255,6 +318,7 @@ export class IoNextApp {
 	}
 
 	async run(): Promise<number> {
+		this.scheduleUpdateCheck();
 		await this.refreshSessions();
 		return this.exitPromise;
 	}
@@ -288,7 +352,15 @@ export class IoNextApp {
 		this.transcript.addUser(prompt);
 		try {
 			if (this.session.revert) await this.session.commitRevert();
-			await this.session.prompt(prompt, { delivery, wait: false });
+			const agents = this.mentionAgents(prompt);
+			const files = this.attachments.map((file) => ({ uri: pathToFileURL(file).href, name: basename(file) }));
+			await this.session.prompt(prompt, {
+				delivery,
+				wait: false,
+				...(agents.length > 0 ? { agents } : {}),
+				...(files.length > 0 ? { files } : {}),
+			});
+			if (files.length > 0) this.attachments = [];
 		} catch (error) {
 			this.lastError = String((error as Error).message ?? error);
 			this.toast(this.lastError, "error");
@@ -309,6 +381,13 @@ export class IoNextApp {
 		}
 		this.palette?.dispose();
 		this.agentPicker?.dispose();
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.mcpPanel?.dispose();
+		this.settingsPanel?.dispose();
+		this.themePicker?.dispose();
 		this.subagentPicker?.dispose();
 		this.errorPanel?.dispose();
 		this.timeline?.dispose();
@@ -341,11 +420,14 @@ export class IoNextApp {
 		await getTreeSitterClient()
 			.initialize()
 			.catch(() => undefined);
-		const [models, agents] = await Promise.all([
+		const [models, agents, commands] = await Promise.all([
 			this.options.engine.listModels(),
 			this.options.engine.listAgents(),
+			this.options.engine.listCommands().catch(() => []),
 		]);
 		this.agentList = agents;
+		this.commandList = commands;
+		this.autocomplete.setCompletions(this.allCompletions());
 		const selected = model ?? (models[0] ? { provider: models[0].provider, id: models[0].id } : undefined);
 		const session = sessionID
 			? await this.options.engine.resumeSession(sessionID)
@@ -404,6 +486,12 @@ export class IoNextApp {
 			this.stopWorking();
 			this.disarmInterrupt();
 			this.shell.setFooter({ mode: event.outcome === "succeeded" ? "ready" : event.outcome });
+			if (process.env.IO_NOTIFY === "1") {
+				this.options.renderer.triggerNotification(
+					event.outcome === "succeeded" ? "turn complete" : `turn ${event.outcome}`,
+					"io",
+				);
+			}
 			if (event.outcome === "failed") {
 				this.lastError = event.error ?? "turn failed";
 				this.toast(this.lastError, "error");
@@ -422,6 +510,18 @@ export class IoNextApp {
 		}
 		if (event.type === "queue_changed") {
 			this.shell.setFooter({ queue: event.pending });
+			return;
+		}
+		if (event.type === "form_requested") {
+			this.openForm(event.form);
+			return;
+		}
+		if (event.type === "form_resolved") {
+			if (this.activeFormID === event.formID) {
+				this.activeFormID = undefined;
+				this.formSheet?.close();
+				this.formSheet = undefined;
+			}
 			return;
 		}
 		if (event.type === "permission_requested") {
@@ -444,6 +544,37 @@ export class IoNextApp {
 			this.lastError = event.message;
 			this.toast(event.message, "error");
 		}
+	}
+
+	private openForm(form: import("../../engine/types.js").EngineForm): void {
+		this.formSheet?.dispose();
+		this.activeFormID = form.id;
+		this.formSheet = new IoFormSheet({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			form,
+			onReply: async (current, answer) => {
+				try {
+					await this.session?.replyForm(current.id, answer);
+				} catch (error) {
+					this.toast(String((error as Error).message ?? error), "error");
+				}
+			},
+			onCancel: async (current, message) => {
+				try {
+					await this.session?.cancelForm(current.id, message);
+				} catch (error) {
+					this.toast(String((error as Error).message ?? error), "error");
+				}
+			},
+			onClose: () => {
+				if (this.activeFormID === form.id) this.activeFormID = undefined;
+				this.resumeUi();
+			},
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		this.formSheet.open();
 	}
 
 	private openPermission(request: EnginePermissionRequest): void {
@@ -494,6 +625,9 @@ export class IoNextApp {
 			case "/subagents":
 				await this.openSubagents();
 				return;
+			case "/pin":
+				this.togglePin();
+				return;
 			case "/timeline":
 				this.openTimeline();
 				return;
@@ -517,6 +651,52 @@ export class IoNextApp {
 				return;
 			case "/edit":
 				await this.openEditor();
+				return;
+			case "/theme":
+				this.openThemes();
+				return;
+			case "/settings":
+				this.openSettings();
+				return;
+			case "/clear":
+				this.clearScreen();
+				return;
+			case "/mcp":
+				await this.openMcp();
+				return;
+			case "/skills":
+				await this.openSkills();
+				return;
+			case "/usage":
+				await this.showUsage();
+				return;
+			case "/attach":
+				this.attachFile(args.join(" "));
+				return;
+			case "/attachments":
+				this.listAttachments();
+				return;
+			case "/detach":
+				this.attachments = [];
+				this.toast("attachments cleared", "info");
+				return;
+			case "/search":
+				await this.searchMessages(args.join(" "));
+				return;
+			case "/debug":
+				await this.showDebug();
+				return;
+			case "/permissions":
+				await this.permissionsCommand(args);
+				return;
+			case "/terminal":
+				this.openTerminal();
+				return;
+			case "/worktrees":
+				await this.worktreesCommand(args);
+				return;
+			case "/preview":
+				this.previewImage(args[0]);
 				return;
 			case "/sessions":
 			case "/resume":
@@ -550,8 +730,14 @@ export class IoNextApp {
 			case "/q":
 				await this.shutdown(0);
 				return;
-			default:
+			default: {
+				const custom = this.commandList.find((entry) => `/${entry.name}` === command);
+				if (custom) {
+					await this.runCustomCommand(custom, args.join(" "));
+					return;
+				}
 				this.transcript.addNotice(`unknown command: ${command}. Type /help.`, "warning");
+			}
 		}
 	}
 
@@ -626,6 +812,13 @@ export class IoNextApp {
 		await this.refreshFooter();
 		this.toast(`agent ${agent.name}`, "success");
 	}	private async openStatus(): Promise<void> {
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.mcpPanel?.dispose();
+		this.settingsPanel?.dispose();
+		this.themePicker?.dispose();
 		this.subagentPicker?.dispose();
 		this.errorPanel?.dispose();
 		this.timeline?.dispose();
@@ -636,7 +829,10 @@ export class IoNextApp {
 			load: async () => {
 				const session = this.session;
 				const stats = await session?.stats().catch(() => undefined);
-				const branch = await getGitBranchAsync(this.options.cwd);
+				const [branch, mcps] = await Promise.all([
+					getGitBranchAsync(this.options.cwd),
+					this.options.engine.listMcp().catch(() => []),
+				]);
 				const model = session?.model;
 				const agents = this.agentList
 					.filter((agent) => !agent.hidden && agent.mode !== "subagent")
@@ -659,6 +855,8 @@ export class IoNextApp {
 					`Cost       ${stats && stats.cost > 0 ? `$${stats.cost.toFixed(4)}` : "—"}`,
 					`Queue      ${this.composer.queued.length}`,
 					`Agents     ${agents || "—"}`,
+					`MCP        ${mcps.length === 0 ? "none" : mcps.map((server) => `${server.name}:${server.status}`).join(", ")}`,
+					`Auth       /connect`,
 					`View       ${this.appearance.themePreference} · ${this.appearance.verbosity} · thinking ${this.appearance.thinking ? "on" : "off"}`,
 				];
 			},
@@ -732,6 +930,13 @@ export class IoNextApp {
 			this.toast("this session has no subagents", "info");
 			return;
 		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.mcpPanel?.dispose();
+		this.settingsPanel?.dispose();
+		this.themePicker?.dispose();
 		this.subagentPicker?.dispose();
 		this.subagentPicker = new IoSubagentPicker({
 			renderer: this.options.renderer,
@@ -907,6 +1112,345 @@ export class IoNextApp {
 		await this.attachSession(session);
 	}
 
+	private scheduleUpdateCheck(): void {
+		if (!this.options.paths) return;
+		const timer = setTimeout(() => {
+			void (async () => {
+				try {
+					const { compareVersions, fetchLatestRelease } = await import("../../update.js");
+					const latest = await fetchLatestRelease(undefined, { userAgent: `io/${VERSION}` });
+					if (latest && compareVersions(latest.version, VERSION) > 0) {
+						this.updateAvailable = latest.version;
+						this.shell.toast(`io ${latest.version} available · /update`, "info", { durationMs: 8_000 });
+						void this.refreshSidebar();
+					}
+				} catch {
+					// Offline is fine; the explicit /update command reports errors.
+				}
+			})();
+		}, 1_500);
+		timer.unref?.();
+	}
+
+	private openTerminal(): void {
+		if (this.terminalPane?.isOpen) {
+			this.terminalPane.close();
+			return;
+		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.terminalPane = new IoTerminalPane({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			cwd: this.options.cwd,
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		this.terminalPane.open();
+	}
+
+	private previewImage(path?: string): void {
+		const target = path ? resolve(this.options.cwd, path) : this.attachments.at(-1);
+		if (!target) {
+			this.toast("usage: /preview <path> (or attach an image first)", "warning");
+			return;
+		}
+		try {
+			if (!statSync(target).isFile()) throw new Error("not a file");
+		} catch {
+			this.toast(`not a file: ${target}`, "error");
+			return;
+		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.imagePanel = new IoImagePanel({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			onClose: () => this.resumeUi(),
+		});
+		this.suspendUi();
+		this.imagePanel.open(target);
+	}
+
+	private async worktreesCommand(args: readonly string[]): Promise<void> {
+		const [action, ...rest] = args;
+		try {
+			const worktrees = await this.options.engine.listWorktrees();
+			if (!action || action === "list") {
+				this.transcript.addNotice(
+					["Worktrees", ...(worktrees.length === 0 ? [" none"] : worktrees.map((worktree, index) => ` ${index + 1}. ${worktree.directory}`))].join("\n"),
+					"info",
+				);
+				return;
+			}
+			if (action === "new") {
+				const worktree = await this.options.engine.createWorktree(rest.join(" ").trim() || undefined);
+				this.transcript.addNotice(`worktree created: ${worktree.directory}`, "success");
+				return;
+			}
+			const target = rest[0];
+			if (!target) {
+				this.toast(`usage: /worktrees ${action} <path|index>`, "warning");
+				return;
+			}
+			const selected = /^\d+$/.test(target)
+				? worktrees[Number(target) - 1]
+				: worktrees.find((worktree) => worktree.directory === target || worktree.directory.endsWith(`/${target}`));
+			if (!selected) {
+				this.toast(`unknown worktree: ${target}`, "warning");
+				return;
+			}
+			if (action === "switch") {
+				await this.changeDirectory(selected.directory);
+				return;
+			}
+			if (action === "remove") {
+				await this.options.engine.removeWorktree(selected.directory);
+				this.transcript.addNotice(`worktree removed: ${selected.directory}`, "success");
+				return;
+			}
+			this.toast(`usage: /worktrees [list|new|switch|remove]`, "warning");
+		} catch (error) {
+			this.toast(String((error as Error).message ?? error), "error");
+		}
+	}
+
+	private async openMcp(): Promise<void> {
+		this.mcpPanel?.dispose();
+		this.mcpPanel = new IoMcpPanel({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			load: () => this.options.engine.listMcp(),
+			onConnect: async (server) => {
+				await this.options.engine.connectMcp(server.name);
+			},
+			onDisconnect: async (server) => {
+				await this.options.engine.disconnectMcp(server.name);
+			},
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		await this.mcpPanel.open();
+	}
+
+	private async openSkills(): Promise<void> {
+		const skills = await this.options.engine.listSkills();
+		if (skills.length === 0) {
+			this.toast("no skills found", "info");
+			return;
+		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.skillsPanel = new IoSkillsPanel({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			skills,
+			onSelect: async (skill) => {
+				try {
+					await this.session?.activateSkill(skill.id);
+					this.toast(`skill ${skill.name} activated`, "success");
+				} catch (error) {
+					this.toast(String((error as Error).message ?? error), "error");
+				}
+			},
+			onClose: () => this.resumeUi(),
+			onError: (error) => this.toast(String((error as Error).message ?? error), "error"),
+		});
+		this.suspendUi();
+		this.skillsPanel.open();
+	}
+
+	private attachFile(path: string): void {
+		if (!path.trim()) {
+			this.toast("usage: /attach <path>", "warning");
+			return;
+		}
+		const target = resolve(this.options.cwd, path.trim());
+		try {
+			if (!statSync(target).isFile()) throw new Error("not a file");
+		} catch {
+			this.toast(`not a file: ${target}`, "error");
+			return;
+		}
+		this.attachments.push(target);
+		this.toast(`attached ${basename(target)}`, "success");
+		void this.refreshFooter();
+	}
+
+	private listAttachments(): void {
+		if (this.attachments.length === 0) {
+			this.transcript.addNotice("no attachments", "info");
+			return;
+		}
+		this.transcript.addNotice(`Attachments\n${this.attachments.map((file) => ` ${file}`).join("\n")}`, "info");
+	}
+
+	private async searchMessages(query: string): Promise<void> {
+		if (!query.trim() || !this.session) {
+			this.toast("usage: /search <text>", "warning");
+			return;
+		}
+		const needle = query.toLowerCase();
+		const messages = await this.session.messages();
+		const matches = messages.filter((message) => message.text.toLowerCase().includes(needle)).slice(-20);
+		if (matches.length === 0) {
+			this.toast("no matches", "info");
+			return;
+		}
+		this.transcript.addNotice(
+			`Search · ${query}\n${matches.map((message) => ` ${message.role}: ${message.text.replace(/\s+/g, " ").slice(0, 140)}`).join("\n")}`,
+			"info",
+		);
+	}
+
+	private async showDebug(): Promise<void> {
+		const [mcps, skills] = await Promise.all([
+			this.options.engine.listMcp().catch(() => []),
+			this.options.engine.listSkills().catch(() => []),
+		]);
+		const lines = [
+			`io ${VERSION} · engine ${this.options.engine.kind}`,
+			`cwd ${this.options.cwd}`,
+			`session ${this.session?.id ?? "—"}`,
+			`agents ${this.agentList.length} · mcp ${mcps.length} · skills ${skills.length}`,
+			`theme ${this.appearance.themePreference} · verbosity ${this.appearance.verbosity}`,
+			`update ${this.updateAvailable ?? "none"}`,
+		];
+		this.transcript.addNotice(`Debug\n${lines.map((line) => ` ${line}`).join("\n")}`, "info");
+	}
+
+	private async showUsage(): Promise<void> {
+		try {
+			const usage = await this.options.engine.usage();
+			if (!usage) {
+				this.toast("no usage limits available", "info");
+				return;
+			}
+			const lines = [`Usage${usage.name ? ` · ${usage.name}` : ""}`];
+			for (const [label, meter] of Object.entries(usage.go ?? {})) {
+				const value = meter as { percent: number; limited: boolean };
+				lines.push(` ${label.padEnd(8)} ${value.percent.toFixed(1)}%${value.limited ? " · limited" : ""}`);
+			}
+			for (const budget of usage.budgets) {
+				lines.push(
+					` budget ${budget.id}  $${budget.spent.toFixed(2)} / $${budget.limit.toFixed(2)}`,
+				);
+			}
+			if (usage.url) lines.push(` ${usage.url}`);
+			this.transcript.addNotice(lines.join("\n"), "info");
+		} catch (error) {
+			this.toast(String((error as Error).message ?? error), "error");
+		}
+	}
+
+	private togglePin(): void {
+		const session = this.session;
+		if (!session) return;
+		const pinned = this.tabs.togglePin(session.id);
+		this.toast(`session ${pinned ? "pinned" : "unpinned"}`, "info");
+		void this.refreshSidebar();
+	}
+
+	private clearScreen(): void {
+		this.transcript.clear();
+		this.options.renderer.requestRender();
+	}
+
+	private persistAppearance(): void {
+		const paths = this.options.paths;
+		if (!paths) return;
+		try {
+			const config = loadConfig(paths).config;
+			saveConfig(paths, { ...config, appearance: this.appearance.toConfig() });
+		} catch (error) {
+			this.toast(String((error as Error).message ?? error), "error");
+		}
+	}
+
+	private openThemes(): void {
+		const options: readonly IoThemeOption[] = [
+			{ id: "io", label: "io", description: "Near-black canvas with a cool accent" },
+			{ id: "io-light", label: "io light", description: "Light canvas with a deep blue accent" },
+			{ id: "system", label: "System", description: "Follow COLORFGBG when available" },
+			{ id: "dark", label: "Dark", description: "Use the dark io palette" },
+			{ id: "light", label: "Light", description: "Use the light io palette" },
+		];
+		this.themePicker?.dispose();
+		this.themePicker = new IoThemePicker({
+			renderer: this.options.renderer,
+			shell: this.shell,
+			options,
+			current: this.appearance.themePreference,
+			onPreview: (id) => {
+				this.appearance.setTheme(id);
+				this.appearance.applyToShell(this.shell);
+				this.appearance.applyToTranscript(this.transcript);
+			},
+			onSelect: (id) => {
+				this.appearance.setTheme(id);
+				this.appearance.applyToShell(this.shell);
+				this.appearance.applyToTranscript(this.transcript);
+				this.persistAppearance();
+				this.toast(`theme: ${id}`, "success");
+			},
+			onClose: () => this.resumeUi(),
+		});
+		this.suspendUi();
+		this.themePicker.open();
+	}
+
+	private settingsRows(): readonly IoSettingRow[] {
+		return [
+			{ id: "theme", label: "Theme", value: this.appearance.themePreference },
+			{ id: "verbosity", label: "Verbosity", value: this.appearance.verbosity },
+			{ id: "thinking", label: "Thinking", value: this.appearance.thinking ? "shown" : "hidden" },
+			{ id: "tps", label: "Tokens/second", value: this.appearance.tps ? "shown" : "hidden" },
+			{ id: "markdown", label: "Markdown", value: this.appearance.markdown },
+			{ id: "toolOutput", label: "Tool output", value: this.appearance.toolOutput },
+		];
+	}
+
+	private openSettings(): void {
+		if (!this.settingsPanel) {
+			this.settingsPanel = new IoSettingsPanel({
+				renderer: this.options.renderer,
+				shell: this.shell,
+				rows: this.settingsRows(),
+				onActivate: (id) => this.cycleSetting(id),
+				onClose: () => this.resumeUi(),
+			});
+		}
+		this.settingsPanel.setRows(this.settingsRows());
+		this.suspendUi();
+		this.settingsPanel.open();
+	}
+
+	private cycleSetting(id: string): void {
+		if (id === "theme") {
+			const index = THEMES.indexOf(this.appearance.themePreference);
+			this.appearance.setTheme(THEMES[(index + 1) % THEMES.length] ?? "io");
+		} else if (id === "verbosity") {
+			this.appearance.cycleVerbosity();
+		} else if (id === "thinking") {
+			this.appearance.setThinking(!this.appearance.thinking);
+		} else if (id === "tps") {
+			this.appearance.setTps(!this.appearance.tps);
+		} else if (id === "markdown") {
+			this.appearance.setMarkdown(this.appearance.markdown === "rendered" ? "source" : "rendered");
+		} else if (id === "toolOutput") {
+			this.appearance.setToolOutput(this.appearance.toolOutput === "expanded" ? "collapsed" : "expanded");
+		}
+		this.appearance.applyToShell(this.shell);
+		this.appearance.applyToTranscript(this.transcript);
+		this.persistAppearance();
+		this.settingsPanel?.setRows(this.settingsRows());
+	}
+
 	private toggleSidebar(): void {
 		const visible = !this.shell.isSidebarVisible;
 		this.shell.toggleSidebar(visible);
@@ -967,6 +1511,9 @@ export class IoNextApp {
 				lines.push(` ${child.busy ? "•" : " "} ${child.title} · ${child.agent ?? "agent"}`);
 			}
 		}
+		if (this.updateAvailable) {
+			lines.push("", "Update", ` io ${this.updateAvailable} available`, " /update to install");
+		}
 		lines.push("", "Queue", ` ${this.composer.queued.length} pending`);
 		this.shell.setSidebar(lines);
 	}
@@ -977,6 +1524,13 @@ export class IoNextApp {
 			this.toast("no user messages yet", "warning");
 			return;
 		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.mcpPanel?.dispose();
+		this.settingsPanel?.dispose();
+		this.themePicker?.dispose();
 		this.subagentPicker?.dispose();
 		this.errorPanel?.dispose();
 		this.timeline?.dispose();
@@ -999,6 +1553,13 @@ export class IoNextApp {
 			this.toast("auth is unavailable in this session", "warning");
 			return;
 		}
+		this.formSheet?.dispose();
+		this.imagePanel?.dispose();
+		this.terminalPane?.dispose();
+		this.skillsPanel?.dispose();
+		this.mcpPanel?.dispose();
+		this.settingsPanel?.dispose();
+		this.themePicker?.dispose();
 		this.subagentPicker?.dispose();
 		this.errorPanel?.dispose();
 		this.timeline?.dispose();
@@ -1316,7 +1877,7 @@ export class IoNextApp {
 	}
 
 	private slashCommands(): IoCommand[] {
-		return SLASH_COMMANDS.map((command) => ({
+		return this.allCompletions().map((command) => ({
 			id: `slash:${command.value}`,
 			title: command.value,
 			description: command.description,
@@ -1339,6 +1900,13 @@ export class IoNextApp {
 	private closeTransientOverlays(): void {
 		this.palette?.close();
 		this.agentPicker?.close();
+		this.formSheet?.close();
+		this.imagePanel?.close();
+		this.terminalPane?.close();
+		this.skillsPanel?.close();
+		this.mcpPanel?.close();
+		this.settingsPanel?.close();
+		this.themePicker?.close();
 		this.subagentPicker?.close();
 		this.errorPanel?.close();
 		this.timeline?.close();
@@ -1354,6 +1922,62 @@ export class IoNextApp {
 	private async refreshSessions(): Promise<void> {
 		this.sessionList = await this.options.engine.listSessions({ directory: this.options.cwd });
 		this.tabs.setSessions(this.sessionList, this.session?.id);
+	}
+
+	private allCompletions(): readonly IoCompletionItem[] {
+		return [
+			...SLASH_COMMANDS,
+			...this.commandList.map((command) => ({
+				value: `/${command.name}`,
+				description: command.description ?? "project command",
+				kind: "command" as const,
+			})),
+		];
+	}
+
+	private async runCustomCommand(command: EngineCommand, text: string): Promise<void> {
+		const session = this.session;
+		if (!session) return;
+		this.transcript.addUser(`/${command.name}${text ? ` ${text}` : ""}`);
+		try {
+			await session.runCommand(command.name, text);
+		} catch (error) {
+			this.lastError = String((error as Error).message ?? error);
+			this.toast(this.lastError, "error");
+		}
+	}
+
+	private async permissionsCommand(args: readonly string[]): Promise<void> {
+		if (args[0] === "remove" && args[1]) {
+			try {
+				await this.options.engine.removeSavedPermission(args[1]);
+				this.toast("permission rule removed", "success");
+			} catch (error) {
+				this.toast(String((error as Error).message ?? error), "error");
+			}
+			return;
+		}
+		const rules = await this.options.engine.listSavedPermissions().catch(() => []);
+		this.transcript.addNotice(
+			[
+				"Saved permissions",
+				...(rules.length === 0
+					? [" none"]
+					: rules.map((rule) => ` ${rule.id}  ${rule.action} ${rule.resource}`)),
+			].join("\n"),
+			"info",
+		);
+	}
+
+	private mentionAgents(text: string): readonly string[] {
+		const mentions = new Set<string>();
+		for (const match of text.matchAll(/@([A-Za-z0-9_./-]+)/g)) {
+			const id = match[1];
+			if (id && this.agentList.some((agent) => agent.id === id && !agent.hidden && agent.mode !== "primary")) {
+				mentions.add(id);
+			}
+		}
+		return [...mentions];
 	}
 
 	private agentName(agentID: string | undefined): string | undefined {
@@ -1397,6 +2021,7 @@ export class IoNextApp {
 				model ? `${model.provider}/${model.id}` : undefined,
 				model?.variant ? `effort ${model.variant}` : undefined,
 				context ? `ctx ${context}` : undefined,
+				this.attachments.length > 0 ? `${this.attachments.length} attachment${this.attachments.length === 1 ? "" : "s"}` : undefined,
 			].filter((value): value is string => typeof value === "string" && value.length > 0);
 			this.shell.setComposerMetadata(metadata.join(" · "));
 		}
@@ -1481,14 +2106,6 @@ export class IoNextApp {
 		this.toast(`tokens/second ${this.appearance.tps ? "on" : "off"}`, "info");
 	}
 
-	private switchTheme(): void {
-		const index = THEMES.indexOf(this.appearance.themePreference);
-		const next = THEMES[(index + 1) % THEMES.length] ?? "io";
-		this.appearance.setTheme(next);
-		this.appearance.applyToShell(this.shell);
-		this.toast(`theme: ${next}`, "info");
-	}
-
 	private toast(message: string, kind: "info" | "success" | "warning" | "error" | "permission"): void {
 		this.shell.toast(message, kind);
 	}
@@ -1520,6 +2137,7 @@ export class IoNextApp {
 			"session.compact": () => this.compact(),
 			"status.show": () => this.openStatus(),
 			"session.timeline": () => this.openTimeline(),
+			"session.pin.toggle": () => this.togglePin(),
 			"session.subagent.next": () => this.openSubagents(),
 			"session.subagent.open": () => this.openSubagents(),
 			"session.child.next": () => this.cycleSibling(1),
@@ -1533,6 +2151,14 @@ export class IoNextApp {
 			"prompt.editor": () => this.openEditor(),
 			"prompt.stash": () => this.stashCommand(),
 			"prompt.stash.pop": () => this.stashCommand("pop"),
+			"settings.open": () => this.openSettings(),
+			"theme.list": () => this.openThemes(),
+			"screen.clear": () => this.clearScreen(),
+			"open.menu": () => this.openSessions(),
+			"mcp.list": () => this.openMcp(),
+			"skills.list": () => this.openSkills(),
+			"usage.show": () => this.showUsage(),
+			"terminal.toggle": () => this.openTerminal(),
 			"session.interrupt": () => this.interrupt(),
 			"prompt.queue": () => {
 				this.composer.submit("queue");
@@ -1543,7 +2169,7 @@ export class IoNextApp {
 			"thinking.toggle": () => this.toggleThinking(),
 			"verbosity.cycle": () => this.cycleVerbosity(),
 			"tps.toggle": () => this.toggleTps(),
-			"theme.switch": () => this.switchTheme(),
+			"theme.switch": () => this.openThemes(),
 			"which-key.toggle": () => this.keymap.showAllBindings(),
 			"app.exit": () => this.shutdown(0),
 		};

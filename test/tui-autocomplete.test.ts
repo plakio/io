@@ -23,6 +23,7 @@ test("io autocomplete shows commands and files, navigates and accepts", { skip: 
 		],
 		cwd: () => "/home/oscar/project",
 		workspaceFiles: async () => ["src/tui/app.ts", "src/engine/opencode.ts", "README.md"],
+		agents: () => [{ id: "general", name: "General", description: "Multi-step work" }],
 		onAccept: (text) => accepted.push(text),
 	});
 
@@ -53,6 +54,22 @@ test("io autocomplete shows commands and files, navigates and accepts", { skip: 
 		assert.match(filesFrame, /src\/tui\/app\.ts/);
 		autocomplete.handleKey({ name: "tab" });
 		assert.match(accepted[1] ?? "", /@src\/tui\/app\.ts /);
+
+		autocomplete.update("/he");
+		assert.equal(autocomplete.visible, true);
+		autocomplete.handleKey({ name: "escape" });
+		assert.equal(autocomplete.visible, false);
+		autocomplete.update("@gen");
+		let agentFrame = "";
+		for (let attempt = 0; attempt < 40; attempt++) {
+			await setup.renderOnce();
+			agentFrame = setup.captureCharFrame();
+			if (agentFrame.includes("General")) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.match(agentFrame, /agent · Multi-step work/);
+		autocomplete.handleKey({ name: "tab" });
+		assert.match(accepted.at(-1) ?? "", /@general /);
 
 		autocomplete.update("/he");
 		assert.equal(autocomplete.visible, true);

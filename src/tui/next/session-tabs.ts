@@ -8,6 +8,7 @@ export class IoSessionTabs {
 	private sessions: readonly EngineSessionSummary[] = [];
 	private activeID: string | undefined;
 	private readonly closed = new Set<string>();
+	private readonly pinned = new Set<string>();
 
 	constructor(shell: IoShell, engine: AgentEngine) {
 		this.shell = shell;
@@ -40,6 +41,14 @@ export class IoSessionTabs {
 		this.render();
 	}
 
+	togglePin(sessionID: string): boolean {
+		const pinned = !this.pinned.has(sessionID);
+		if (pinned) this.pinned.add(sessionID);
+		else this.pinned.delete(sessionID);
+		this.render();
+		return pinned;
+	}
+
 	setActive(sessionID: string): void {
 		this.activeID = sessionID;
 		this.closed.delete(sessionID);
@@ -62,7 +71,11 @@ export class IoSessionTabs {
 	}
 
 	private visible(): readonly EngineSessionSummary[] {
-		return this.sessions.filter((session) => !this.closed.has(session.id));
+		const open = this.sessions.filter((session) => !this.closed.has(session.id));
+		return [
+			...open.filter((session) => this.pinned.has(session.id)),
+			...open.filter((session) => !this.pinned.has(session.id)),
+		];
 	}
 
 	private render(): void {
@@ -71,8 +84,8 @@ export class IoSessionTabs {
 		this.shell.setTabs(
 			visible.map((session, index) => ({
 				id: String(index + 1),
-				label: shorten(session.title, 22),
-				status: "idle",
+				label: `${this.pinned.has(session.id) ? "★ " : ""}${shorten(session.title, 22)}`,
+				status: session.busy ? "busy" : "idle",
 			})),
 			activeIndex >= 0 ? String(activeIndex + 1) : undefined,
 		);

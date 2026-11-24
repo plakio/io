@@ -5,21 +5,31 @@ import { OpenCode } from "@opencode/sdk";
 import type {
 	AgentEngine,
 	EngineAgent,
+	EngineCommand,
 	EngineFileDiff,
+	EngineForm,
+	EngineFormField,
 	EngineMessage,
 	EngineMessageRole,
+	EngineMcpServer,
 	EngineModel,
 	EngineModelRef,
 	EnginePermissionRequest,
 	EnginePermissionRule,
 	EnginePromptOptions,
 	EngineRevert,
+	EngineSavedPermission,
 	EngineSession,
 	EngineSessionListOptions,
+	EngineSkill,
 	EngineSessionOptions,
 	EngineSessionSummary,
 	EngineStats,
 	EngineTokenUsage,
+	EngineUsage,
+	EngineUsageMeter,
+	EngineFormValue,
+	EngineWorktree,
 	IoEvent,
 	PermissionDecision,
 } from "./types.js";
@@ -167,6 +177,74 @@ function revertOf(raw: unknown): EngineRevert | undefined {
 	return { messageID: value.messageID, files };
 }
 
+function formOf(raw: unknown): EngineForm | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const value = raw as {
+		id?: unknown;
+		sessionID?: unknown;
+		title?: unknown;
+		fields?: unknown;
+	};
+	if (typeof value.id !== "string" || typeof value.sessionID !== "string") return undefined;
+	const fields: EngineFormField[] = [];
+	if (Array.isArray(value.fields)) {
+		for (const entry of value.fields) {
+			if (!entry || typeof entry !== "object") continue;
+			const field = entry as {
+				key?: unknown;
+				title?: unknown;
+				description?: unknown;
+				required?: unknown;
+				hidden?: unknown;
+				type?: unknown;
+				options?: unknown;
+				default?: unknown;
+				url?: unknown;
+			};
+			if (typeof field.key !== "string") continue;
+			const type =
+				field.type === "number" ||
+				field.type === "integer" ||
+				field.type === "boolean" ||
+				field.type === "multiselect" ||
+				field.type === "external"
+					? field.type
+					: "string";
+			const options = Array.isArray(field.options)
+				? field.options
+						.map((option) => {
+							const item = option as { value?: unknown; label?: unknown; description?: unknown };
+							return typeof item.value === "string"
+								? {
+									value: item.value,
+									label: typeof item.label === "string" ? item.label : item.value,
+									description: typeof item.description === "string" ? item.description : undefined,
+								}
+								: undefined;
+						})
+						.filter((option): option is NonNullable<typeof option> => option !== undefined)
+				: undefined;
+			fields.push({
+				key: field.key,
+				title: typeof field.title === "string" ? field.title : undefined,
+				description: typeof field.description === "string" ? field.description : undefined,
+				required: field.required === true,
+				hidden: field.hidden === true,
+				type,
+				options,
+				default: field.default as EngineFormValue | undefined,
+				url: typeof field.url === "string" ? field.url : undefined,
+			});
+		}
+	}
+	return {
+		id: value.id,
+		sessionID: value.sessionID,
+		title: typeof value.title === "string" ? value.title : "Form",
+		fields,
+	};
+}
+
 function messageRole(type: string): EngineMessageRole {
 	if (type === "user") return "user";
 	if (type === "assistant") return "assistant";
@@ -209,7 +287,7 @@ export class OpenCodeEngine implements AgentEngine {
 		const host = await OpenCode.create({
 			app: { name: "io", version: VERSION },
 			database: { path: options.databasePath },
-			config: { directory: options.configDir, project: false, claude: false },
+			config: { directory: options.configDir, project: true, claude: false },
 			models: { fetch: options.fetchModels === true },
 			plugins: [BuiltinAgentPlugin, ...(options.plugins ?? [])] as never,
 			log: { level: "error" },
@@ -229,6 +307,145 @@ export class OpenCodeEngine implements AgentEngine {
 	async findModel(reference: EngineModelRef): Promise<EngineModel | undefined> {
 		const key = `${reference.provider}/${reference.id}`;
 		return this.models.get(key) ?? (await this.listModels()).find((model) => `${model.provider}/${model.id}` === key);
+	}
+
+	async listCommands(): Promise<readonly EngineCommand[]> {
+		const result = await this.host.command.list({ location: { directory: this.cwd } });
+		const data = (result as { data?: unknown[] }).data ?? [];
+		return data
+			.map((raw): EngineCommand | undefined => {
+				const value = raw as { name?: unknown; description?: unknown };
+				return typeof value.name === "string"
+					? { name: value.name, description: typeof value.description === "string" ? value.description : undefined }
+					: undefined;
+			})
+			.filter((command): command is EngineCommand => command !== undefined);
+	}
+
+	async listSavedPermissions(): Promise<readonly EngineSavedPermission[]> {
+		const data = await this.host.permission.saved.list();
+		return data.map((entry: { id: string; action: string; resource: string }) => ({
+			id: entry.id,
+			action: entry.action,
+			resource: entry.resource,
+		}));
+	}
+
+	async removeSavedPermission(id: string): Promise<void> {
+		await this.host.permission.saved.remove({ id });
+	}
+
+	private async projectID(): Promise<string> {
+		const location = await this.host.location.get({ directory: this.cwd });
+		return location.project.id;
+	}
+
+	async listWorktrees(): Promise<readonly EngineWorktree[]> {
+		const projectID = await this.projectID();
+		const result = await this.host.worktree.list({ projectID });
+		const data = Array.isArray(result) ? result : [];
+		return data
+			.map((raw): EngineWorktree | undefined => {
+				const value = raw as { directory?: unknown; strategy?: unknown };
+				return typeof value.directory === "string"
+					? { directory: value.directory, strategy: typeof value.strategy === "string" ? value.strategy : undefined }
+					: undefined;
+			})
+			.filter((worktree): worktree is EngineWorktree => worktree !== undefined);
+	}
+
+	async createWorktree(name?: string): Promise<EngineWorktree> {
+		const projectID = await this.projectID();
+		const info = await this.host.worktree.create({ projectID, ...(name ? { name } : {}) });
+		return { directory: info.directory };
+	}
+
+	async removeWorktree(directory: string, force = false): Promise<void> {
+		const projectID = await this.projectID();
+		await this.host.worktree.remove({ projectID, directory, force });
+	}
+
+	async listMcp(): Promise<readonly EngineMcpServer[]> {
+		const result = await this.host.mcp.list({ location: { directory: this.cwd } });
+		const data = (result as { data?: unknown[] }).data ?? [];
+		return data
+			.map((raw): EngineMcpServer | undefined => {
+				const value = raw as { name?: unknown; status?: unknown; title?: unknown };
+				if (typeof value.name !== "string") return undefined;
+				const status =
+					value.status && typeof value.status === "object" && typeof (value.status as { status?: unknown }).status === "string"
+						? ((value.status as { status: string }).status)
+						: "unknown";
+				return {
+					name: value.name,
+					status,
+					title: typeof value.title === "string" ? value.title : undefined,
+				};
+			})
+			.filter((server): server is EngineMcpServer => server !== undefined);
+	}
+
+	async connectMcp(name: string): Promise<void> {
+		await this.host.experimental.mcp.connect({ server: name, location: { directory: this.cwd } });
+	}
+
+	async disconnectMcp(name: string): Promise<void> {
+		await this.host.experimental.mcp.disconnect({ server: name, location: { directory: this.cwd } });
+	}
+
+	async listSkills(): Promise<readonly EngineSkill[]> {
+		const result = await this.host.skill.list({ location: { directory: this.cwd } });
+		const data = (result as { data?: unknown[] }).data ?? [];
+		return data
+			.map((raw): EngineSkill | undefined => {
+				const value = raw as { id?: unknown; name?: unknown; description?: unknown };
+				if (typeof value.id !== "string") return undefined;
+				return {
+					id: value.id,
+					name: typeof value.name === "string" ? value.name : value.id,
+					description: typeof value.description === "string" ? value.description : undefined,
+				};
+			})
+			.filter((skill): skill is EngineSkill => skill !== undefined);
+	}
+
+	async usage(): Promise<EngineUsage | undefined> {
+		const result = await this.host.experimental.usage.limits({ location: { directory: this.cwd } });
+		const data = (result as { data?: unknown }).data;
+		if (!data || typeof data !== "object") return undefined;
+		const value = data as {
+			workspace?: { id?: unknown; name?: unknown; usageURL?: unknown };
+			go?: { rolling?: unknown; weekly?: unknown; monthly?: unknown };
+			budgets?: unknown;
+		};
+		const meter = (raw: unknown): EngineUsageMeter | undefined => {
+			if (!raw || typeof raw !== "object") return undefined;
+			const item = raw as { percent?: unknown; limited?: unknown; resetsAt?: unknown };
+			return {
+				percent: number(item.percent),
+				limited: item.limited === true,
+				resetsAt: number(item.resetsAt),
+			};
+		};
+		const rolling = meter(value.go?.rolling);
+		const weekly = meter(value.go?.weekly);
+		const monthly = meter(value.go?.monthly);
+		return {
+			workspace: typeof value.workspace?.id === "string" ? value.workspace.id : "",
+			name: typeof value.workspace?.name === "string" ? value.workspace.name : undefined,
+			url: typeof value.workspace?.usageURL === "string" ? value.workspace.usageURL : undefined,
+			go: rolling && weekly && monthly ? { rolling, weekly, monthly } : undefined,
+			budgets: Array.isArray(value.budgets)
+				? value.budgets
+						.map((raw) => {
+							const item = raw as { id?: unknown; limit?: unknown; spent?: unknown; resetsAt?: unknown };
+							return typeof item.id === "string"
+								? { id: item.id, limit: number(item.limit), spent: number(item.spent), resetsAt: number(item.resetsAt) }
+								: undefined;
+						})
+						.filter((budget): budget is NonNullable<typeof budget> => budget !== undefined)
+				: [],
+		};
 	}
 
 	async listAgents(): Promise<readonly EngineAgent[]> {
@@ -422,6 +639,12 @@ export class OpenCodeSession implements EngineSession {
 				sessionID: this.id,
 				text,
 				...(options.delivery ? { delivery: options.delivery } : {}),
+				...(options.agents && options.agents.length > 0
+					? { agents: options.agents.map((name) => ({ name })) }
+					: {}),
+				...(options.files && options.files.length > 0
+					? { files: options.files.map((file) => ({ uri: file.uri, ...(file.name ? { name: file.name } : {}) })) }
+					: {}),
 			});
 			if (settled) await settled;
 		} finally {
@@ -468,6 +691,22 @@ export class OpenCodeSession implements EngineSession {
 			if (info.location?.directory === directory) return;
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
+	}
+
+	async replyForm(formID: string, answer: Record<string, EngineFormValue>): Promise<void> {
+		await this.host.sessions.form.reply({ sessionID: this.id, formID, answer: answer as never });
+	}
+
+	async cancelForm(formID: string, message?: string): Promise<void> {
+		await this.host.sessions.form.cancel({ sessionID: this.id, formID, ...(message ? { message } : {}) });
+	}
+
+	async runCommand(name: string, text: string): Promise<void> {
+		await this.host.sessions.command({ sessionID: this.id, name, text });
+	}
+
+	async activateSkill(skillID: string): Promise<void> {
+		await this.host.experimental.session.skill({ sessionID: this.id, id: skillID, resume: true });
 	}
 
 	async stageRevert(messageID: string): Promise<void> {
@@ -734,6 +973,21 @@ export class OpenCodeSession implements EngineSession {
 				});
 				this.toolNames.delete(toolCallID);
 				return;
+			}
+			case "form.created": {
+				const form = formOf((event.data as { form?: unknown })?.form);
+				if (form) this.emit({ type: "form_requested", sessionID: this.id, form });
+				break;
+			}
+			case "form.replied": {
+				const data = event.data as { id?: unknown };
+				if (typeof data?.id === "string") this.emit({ type: "form_resolved", sessionID: this.id, formID: data.id, status: "answered" });
+				break;
+			}
+			case "form.cancelled": {
+				const data = event.data as { id?: unknown };
+				if (typeof data?.id === "string") this.emit({ type: "form_resolved", sessionID: this.id, formID: data.id, status: "cancelled" });
+				break;
 			}
 			case "permission.asked": {
 				const request: EnginePermissionRequest = {

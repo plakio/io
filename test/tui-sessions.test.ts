@@ -5,8 +5,8 @@ import type { AgentEngine, EngineSessionSummary } from "../src/engine/types.js";
 const [major, minor] = process.versions.node.split(".").map(Number);
 const supported = Boolean(process.versions.bun) || (major ?? 0) > 26 || ((major ?? 0) === 26 && (minor ?? 0) >= 4);
 
-function session(id: string, title: string, updatedAt = Date.now()): EngineSessionSummary {
-	return { id, title, createdAt: updatedAt, updatedAt };
+function session(id: string, title: string, updatedAt = Date.now(), busy = false): EngineSessionSummary {
+	return { id, title, createdAt: updatedAt, updatedAt, busy };
 }
 
 test("io session tabs show root sessions and hide a single tab", { skip: !supported }, async () => {
@@ -20,11 +20,17 @@ test("io session tabs show root sessions and hide a single tab", { skip: !suppor
 	const tabs = new IoSessionTabs(shell, engine);
 
 	try {
-		tabs.setSessions([session("ses_a", "Build auth"), session("ses_b", "Explore tests")], "ses_a");
+		tabs.setSessions([session("ses_a", "Build auth", 1, true), session("ses_b", "Explore tests")], "ses_a");
 		await setup.renderOnce();
 		const frame = setup.captureCharFrame();
-		assert.match(frame, /Build auth/);
+		assert.match(frame, /• 1 Build auth/);
 		assert.match(frame, /Explore tests/);
+
+		assert.equal(tabs.togglePin("ses_b"), true);
+		await setup.renderOnce();
+		assert.equal(tabs.current[0]?.id, "ses_b");
+		assert.match(setup.captureCharFrame(), /★/);
+		assert.equal(tabs.togglePin("ses_b"), false);
 
 		const next = tabs.closeSlot(2);
 		assert.equal(next?.id, "ses_a");

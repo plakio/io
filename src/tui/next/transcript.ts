@@ -216,6 +216,7 @@ export class IoTranscript {
 	private readonly syntaxStyle: SyntaxStyle;
 	private readonly assistantBlocks = new Map<string, AssistantBlock>();
 	private readonly toolCards = new Map<string, ToolCard>();
+	private toolGroup: { box: BoxRenderable; header: TextRenderable; cards: ToolCard[]; collapsed: boolean } | undefined;
 	private readonly userBlocks: Array<{ text: string; box: BoxRenderable }> = [];
 	private activeAssistant: AssistantBlock | undefined;
 	private showThinking: boolean;
@@ -333,12 +334,14 @@ export class IoTranscript {
 				this.activeAssistant = undefined;
 				return;
 			case "text_started": {
+				this.closeToolGroup();
 				const block = this.ensureAssistant(event.messageID);
 				block.setText("", true);
 				this.activeAssistant = block;
 				return;
 			}
 			case "text_delta": {
+				this.closeToolGroup();
 				const block = this.assistantBlocks.get(event.messageID) ?? this.ensureAssistant(event.messageID);
 				block.setText(this.textFor(event.messageID) + event.delta, true);
 				this.activeAssistant = block;
@@ -354,11 +357,13 @@ export class IoTranscript {
 				return;
 			}
 			case "reasoning_started": {
+				this.closeToolGroup();
 				const block = this.ensureAssistant(event.messageID);
 				block.setThinking("", this.showThinking);
 				return;
 			}
 			case "reasoning_delta": {
+				this.closeToolGroup();
 				const block = this.ensureAssistant(event.messageID);
 				const previous = this.thinkingFor(event.messageID);
 				block.setThinking(previous + event.delta, this.showThinking);
@@ -370,7 +375,33 @@ export class IoTranscript {
 				const card = new ToolCard(this.renderer, this.theme, event.name);
 				card.setExpanded(this.toolOutputExpanded);
 				this.toolCards.set(event.toolCallID, card);
-				this.container.add(card.box);
+				if (!this.toolGroup) {
+					const box = new BoxRenderable(this.renderer, {
+						flexDirection: "column",
+						width: "100%",
+						marginBottom: 1,
+					});
+					const header = new TextRenderable(this.renderer, {
+						content: "▾ tools · 1",
+						fg: this.theme.muted,
+						bg: this.theme.background,
+						height: 1,
+						wrapMode: "none",
+					});
+					const group = { box, header, cards: [] as ToolCard[], collapsed: false };
+					header.onMouseDown = () => {
+						group.collapsed = !group.collapsed;
+						for (const item of group.cards) item.box.visible = !group.collapsed;
+						header.content = `${group.collapsed ? "▸" : "▾"} tools · ${group.cards.length}`;
+						this.renderer.requestRender();
+					};
+					box.add(header);
+					this.toolGroup = group;
+					this.container.add(box);
+				}
+				this.toolGroup.cards.push(card);
+				this.toolGroup.box.add(card.box);
+				this.toolGroup.header.content = `${this.toolGroup.collapsed ? "▸" : "▾"} tools · ${this.toolGroup.cards.length}`;
 				this.scrollToEnd();
 				this.renderer.requestRender();
 				return;
@@ -413,6 +444,7 @@ export class IoTranscript {
 			case "turn_ended":
 				this.activeAssistant?.finalize();
 				this.activeAssistant = undefined;
+				this.closeToolGroup();
 				return;
 			case "idle":
 				this.activeAssistant?.finalize();
@@ -430,6 +462,7 @@ export class IoTranscript {
 		clearChildren(this.container);
 		this.assistantBlocks.clear();
 		this.toolCards.clear();
+		this.toolGroup = undefined;
 		this.userBlocks.length = 0;
 		this.activeAssistant = undefined;
 		this.renderer.requestRender();
@@ -458,6 +491,10 @@ export class IoTranscript {
 
 	private thinkingFor(messageID: string): string {
 		return this.assistantBlocks.get(messageID)?.thinkingText ?? "";
+	}
+
+	private closeToolGroup(): void {
+		this.toolGroup = undefined;
 	}
 
 	private scrollToEnd(): void {

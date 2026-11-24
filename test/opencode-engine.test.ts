@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,8 @@ test("OpenCode engine streams text and exposes models, stats and messages", { sk
 	const { startMockModelServer, createMockPlugin } = await import("./opencode-mock.js");
 	const { OpenCodeEngine } = await import("../src/engine/opencode.js");
 	const root = mkdtempSync(join(tmpdir(), "io-engine-"));
+	mkdirSync(join(root, ".opencode", "command"), { recursive: true });
+	writeFileSync(join(root, ".opencode", "command", "hello.md"), "---\ndescription: Test command\n---\nSay hello.\n");
 	const server = await startMockModelServer();
 	const engine = await OpenCodeEngine.create({
 		cwd: root,
@@ -33,6 +35,9 @@ test("OpenCode engine streams text and exposes models, stats and messages", { sk
 		}
 		assert.equal(agents.find((agent) => agent.id === "general")?.mode, "subagent");
 		assert.equal(agents.find((agent) => agent.id === "title")?.hidden, true);
+		assert.ok(Array.isArray(await engine.listWorktrees()));
+		const commands = await engine.listCommands();
+		assert.ok(commands.some((command) => command.name === "hello"), "project command should load");
 
 		const session = await engine.createSession({
 			directory: root,

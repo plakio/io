@@ -20,6 +20,8 @@ export interface IoAutocompleteOptions {
 	cwd: () => string;
 	/** Inject for tests or non-git workspaces. */
 	workspaceFiles?: (cwd: string) => Promise<readonly string[]>;
+	/** Subagents available through @mentions. */
+	agents?: () => readonly { id: string; name: string; description?: string }[];
 	theme?: IoTheme;
 	onAccept: (text: string) => void;
 }
@@ -31,9 +33,10 @@ type Match = IoCompletionItem & { absolute?: string };
 export class IoAutocomplete {
 	private readonly renderer: CliRenderer;
 	private readonly shell: IoShell;
-	private readonly completions: readonly IoCompletionItem[];
+	private completions: readonly IoCompletionItem[];
 	private readonly cwd: () => string;
 	private readonly workspaceFiles: (cwd: string) => Promise<readonly string[]>;
+	private readonly agents: () => readonly { id: string; name: string; description?: string }[];
 	private readonly theme: IoTheme;
 	private readonly onAccept: (text: string) => void;
 	private mode: Mode | undefined;
@@ -52,12 +55,17 @@ export class IoAutocomplete {
 		this.completions = options.completions;
 		this.cwd = options.cwd;
 		this.workspaceFiles = options.workspaceFiles ?? workspaceFiles;
+		this.agents = options.agents ?? (() => []);
 		this.theme = options.theme ?? ioDarkTheme;
 		this.onAccept = options.onAccept;
 	}
 
 	get visible(): boolean {
 		return this.mode !== undefined;
+	}
+
+	setCompletions(completions: readonly IoCompletionItem[]): void {
+		this.completions = completions;
 	}
 
 	get selectedMatch(): Match | undefined {
@@ -165,7 +173,18 @@ export class IoAutocomplete {
 		}
 		if (request !== this.fileRequest || this.mode !== "file") return;
 		const needle = query.toLowerCase();
-		this.matches = this.files
+		const agents = this.agents()
+			.filter(
+				(agent) =>
+					needle.length === 0 ||
+					`${agent.id} ${agent.name} ${agent.description ?? ""}`.toLowerCase().includes(needle),
+			)
+			.map((agent) => ({
+				value: agent.id,
+				description: `agent · ${agent.description ?? agent.name}`,
+				kind: "agent" as const,
+			}));
+		const files = this.files
 			.filter((file) => needle.length === 0 || file.toLowerCase().includes(needle))
 			.map((file) => ({
 				value: file,
@@ -174,6 +193,7 @@ export class IoAutocomplete {
 				kind: "path" as const,
 			}))
 			.slice(0, 10);
+		this.matches = [...agents, ...files].slice(0, 10);
 		this.selected = 0;
 		this.render();
 	}
